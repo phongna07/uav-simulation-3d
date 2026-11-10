@@ -127,6 +127,8 @@ def render(args):
         matplotlib.rcParams["animation.ffmpeg_path"] = imageio_ffmpeg.get_ffmpeg_exe()
         frames = np.r_[np.arange(0,times[-1],args.speed/args.fps),times[-1]]
         animation = FuncAnimation(fig,update,frames=frames,interval=1000/args.fps,blit=False)
-        animation.save(output,writer=FFMpegWriter(fps=args.fps,codec="libx264",bitrate=1800))
+        animation.save(output, dpi=160,
+                       writer=FFMpegWriter(fps=args.fps, codec="libx264", bitrate=6000,
+                                           extra_args=["-pix_fmt", "yuv420p"]))
     plt.close(fig)
     print(output)

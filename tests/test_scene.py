@@ -34,11 +34,15 @@ def test_paving_does_not_paint_over_obstacles(elevation):
     # Exact facade, roof, trunk and foliage colors exclude antialiased edges.
     colors = ["#aa9586", "#84776e", "#918175", "#b6a293", "#d0c7bd",
               "#70503a", "#826044", "#5d4331", "#39734d", "#448558",
-              "#508d5b", "#326846", "#619664"]
+              "#508d5b", "#326846", "#619664", "#667078", "#e0ddd4",
+              "#6894a6", "#9fc1cd", "#24485e"]
     mask = np.zeros(reference.shape[:2], dtype=bool)
     for color in colors:
         rgb = np.round(np.array(matplotlib.colors.to_rgb(color))*255).astype(np.uint8)
         mask |= np.all(reference[:, :, :3] == rgb, axis=2)
+    # Directional lighting now gives foliage continuously varying green shades.
+    rgb = reference[:, :, :3].astype(float)
+    mask |= (rgb[:, :, 1] > 1.2*rgb[:, :, 0]) & (rgb[:, :, 1] > 1.2*rgb[:, :, 2])
     # Erode the mask to remove boundary pixels whose antialiasing blends with
     # the background even when the obstacle is correctly drawn on top.
     mask = binary_erosion(mask)

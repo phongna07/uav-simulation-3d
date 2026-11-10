@@ -32,56 +32,142 @@ def _building(meshes, x, y, width, depth, height, index):
         ["#9eabb3", "#74838e", "#84939d", "#b0bbc2", "#d2d9dc"],
         ["#b29e8b", "#8c7968", "#9b8878", "#c1ad98", "#ded2c4"],
     ]
-    _box(meshes, x, y, width, depth, 0, height, palettes[index % len(palettes)])
-    # Windows sit just outside each facade; the building's footprint is exact.
-    windows = []
+    palette = palettes[index % len(palettes)]
+    # Tile each facade around its windows instead of laying glass over a huge
+    # wall polygon. This avoids mplot3d hiding lower windows during face sorting.
     rows = 4
-    eps = min(width, depth)*.001
-    for axis, span in ((0, width), (1, depth)):
-        columns = max(2, min(7, int(span / 8)))
-        for column in range(columns):
-            lo = span*(column+.24)/columns
-            hi = span*(column+.76)/columns
-            for row in range(rows):
-                z0, z1 = height*(.12+row*.20), height*(.24+row*.20)
-                for far in (False, True):
-                    if axis == 0:
-                        wall = y+depth+eps if far else y-eps
-                        face = [(x+lo, wall, z0), (x+hi, wall, z0),
-                                (x+hi, wall, z1), (x+lo, wall, z1)]
-                    else:
-                        wall = x+width+eps if far else x-eps
-                        face = [(wall, y+lo, z0), (wall, y+hi, z0),
-                                (wall, y+hi, z1), (wall, y+lo, z1)]
-                    windows.append(face)
-    _mesh(meshes, windows, ["#b9d5df" if i % 7 else "#f2d6a0"
-                        for i in range(len(windows))],
-          edgecolors="#53636d", linewidths=.2)
-    # Recessed rooftop equipment leaves the original obstacle outline intact.
-    _box(meshes, x+.32*width, y+.32*depth, .36*width, .36*depth,
-         height, height*1.04, ["#68737c"]*4+["#9aa4ac"])
+    for side, span in enumerate((width, depth, width, depth)):
+        columns = max(2, min(7, int(span / 9)))
+
+        def panel(u0, u1, z0, z1, color):
+            if side in (0, 2):
+                wall = y if side == 0 else y+depth
+                face = [(x+u0, wall, z0), (x+u1, wall, z0),
+                        (x+u1, wall, z1), (x+u0, wall, z1)]
+            else:
+                wall = x+width if side == 1 else x
+                face = [(wall, y+u0, z0), (wall, y+u1, z0),
+                        (wall, y+u1, z1), (wall, y+u0, z1)]
+            _mesh(meshes, [face], color)
+
+        for row in range(rows):
+            bottom, top = height*row/rows, height*(row+1)/rows
+            for col in range(columns):
+                left, right = span*col/columns, span*(col+1)/columns
+                lo, hi = left+(right-left)*.20, right-(right-left)*.20
+                z0, z1 = bottom+height*.055, top-height*.045
+                door = row == 0 and col == columns//2 and side in (0, 3)
+                if door:
+                    z0 = 0
+                panel(left, lo, bottom, top, palette[side])
+                panel(hi, right, bottom, top, palette[side])
+                panel(lo, hi, bottom, z0, palette[side])
+                panel(lo, hi, z1, top, palette[side])
+                # A dark frame, narrow mullion and two blue glass panes.
+                frame = min(span/columns*.045, height*.012)
+                panel(lo, hi, z0, z0+frame, "#46545c")
+                panel(lo, hi, z1-frame, z1, "#46545c")
+                panel(lo, lo+frame, z0+frame, z1-frame, "#46545c")
+                panel(hi-frame, hi, z0+frame, z1-frame, "#46545c")
+                mid = (lo+hi)/2
+                panel(mid-frame/2, mid+frame/2, z0+frame, z1-frame, "#46545c")
+                lit = (index*3+row*7+col+side) % 13 == 0
+                panel(lo+frame, mid-frame/2, z0+frame, z1-frame,
+                      "#ebd6a5" if lit else "#6894a6")
+                panel(mid+frame/2, hi-frame, z0+frame, z1-frame,
+                      "#f5e5bf" if lit else "#9fc1cd")
+            # Pale stone courses and darker foundations emphasize each floor.
+            band = height*(.018 if row else .035)
+            panel(0, span, bottom, bottom+band, "#6a7072" if row == 0 else palette[4])
+
+    # Inset roof, solid coping and four parapets, all inside the footprint.
+    rim = min(width, depth)*.035
+    _box(meshes, x+rim, y+rim, width-2*rim, depth-2*rim,
+         height*.995, height, ["#667078"]*5)
+    for bx, by, bw, bd in ((x, y, width, rim), (x, y+depth-rim, width, rim),
+                            (x, y+rim, rim, depth-2*rim),
+                            (x+width-rim, y+rim, rim, depth-2*rim)):
+        _box(meshes, bx, by, bw, bd, height*.98, height*1.055,
+             [palette[0], palette[1], palette[2], palette[3], "#e0ddd4"])
+    _box(meshes, x+.60*width, y+.57*depth, .23*width, .25*depth,
+         height, height*1.09, ["#899397"]*4+["#c5cccd"])
+    # Small sloping solar panels create recognizable rooftop silhouettes.
+    for row in range(2):
+        for col in range(3):
+            px, py = x+width*(.14+col*.13), y+depth*(.23+row*.22)
+            face = [(px, py, height*1.015), (px+width*.11, py, height*1.015),
+                    (px+width*.11, py+depth*.16, height*1.065),
+                    (px, py+depth*.16, height*1.065)]
+            _mesh(meshes, [face], "#24485e", edgecolors="#9db2ba", linewidths=.35)
+
+
+def _branch(meshes, start, end, radius):
+    start, end = np.asarray(start), np.asarray(end)
+    axis = end-start
+    axis = axis/np.linalg.norm(axis)
+    across = np.cross(axis, [0., 1., 0.])
+    across /= np.linalg.norm(across)
+    other = np.cross(axis, across)
+    angles = np.arange(9)*2*np.pi/8
+    ring = np.array([np.cos(a)*across+np.sin(a)*other for a in angles])
+    faces = [[start+radius*ring[i], start+radius*ring[i+1],
+              end+radius*.55*ring[i+1], end+radius*.55*ring[i]] for i in range(8)]
+    _mesh(meshes, faces, ["#70503a", "#826044", "#5d4331", "#987454"])
+
+
+def _crown(meshes, center, radii, rng, base):
+    # Irregular triangulated ellipsoids with a consistent sunlight direction.
+    # Adjacent triangles share vertices: no cracks or regular striped bands.
+    sectors, bands = 10, 6
+    vertices = []
+    for band in range(bands+1):
+        latitude = np.pi*band/bands
+        phase = (band % 2)*np.pi/sectors
+        ring = []
+        for sector in range(sectors):
+            angle = sector*2*np.pi/sectors+phase
+            rough = rng.uniform(.90, 1.08) if band not in (0, bands) else 1.
+            ring.append(np.asarray(center)+np.asarray(radii)*rough*np.array([
+                np.sin(latitude)*np.cos(angle), np.sin(latitude)*np.sin(angle),
+                np.cos(latitude)]))
+        vertices.append(ring)
+    sun = np.array([-.45, -.6, .8])
+    sun /= np.linalg.norm(sun)
+    faces, colors = [], []
+    for band in range(bands):
+        for sector in range(sectors):
+            nxt = (sector+1) % sectors
+            quad = [vertices[band][sector], vertices[band+1][sector],
+                    vertices[band+1][nxt], vertices[band][nxt]]
+            for triangle in ((quad[0], quad[1], quad[2]), (quad[0], quad[2], quad[3])):
+                normal = np.cross(triangle[1]-triangle[0], triangle[2]-triangle[0])
+                length = np.linalg.norm(normal)
+                if length < 1e-10:
+                    continue
+                normal /= length
+                if np.dot(normal, np.mean(triangle, axis=0)-center) < 0:
+                    normal = -normal
+                light = .72+.35*max(0, np.dot(normal, sun))+rng.uniform(-.045, .045)
+                faces.append(triangle)
+                colors.append(tuple(np.clip(np.asarray(base)*light, 0, 1)))
+    _mesh(meshes, faces, colors)
 
 
 def _tree(meshes, x, y, radius, height, index):
-    angles = np.linspace(0, 2*np.pi, 17)
-    # Low-poly trunk and broad crown; every ring fits inside the recorded disk.
-    def rings(profile, palette):
-        faces, colors = [], []
-        for band, ((z0, r0), (z1, r1)) in enumerate(zip(profile, profile[1:])):
-            for sector in range(len(angles)-1):
-                a, b = angles[sector:sector+2]
-                faces.append([(x+r0*np.cos(a), y+r0*np.sin(a), z0),
-                              (x+r0*np.cos(b), y+r0*np.sin(b), z0),
-                              (x+r1*np.cos(b), y+r1*np.sin(b), z1),
-                              (x+r1*np.cos(a), y+r1*np.sin(a), z1)])
-                colors.append(palette[(sector+band+index) % len(palette)])
-        _mesh(meshes, faces, colors, linewidths=0)
-    rings([(0, radius*.15), (height*.48, radius*.12)],
-          ["#70503a", "#826044", "#5d4331"])
-    rings([(height*.25, 0), (height*.38, radius*.78),
-           (height*.58, radius), (height*.80, radius*.80),
-           (height*.96, radius*.40), (height, 0)],
-          ["#39734d", "#448558", "#508d5b", "#326846", "#619664"])
+    rng = np.random.default_rng(4100+index)
+    # Each tree has a branched trunk and an asymmetric, clustered leaf crown.
+    # Offsets plus lobe radii stay strictly inside the original obstacle disk.
+    top = height*(.92+.07*rng.random())
+    _branch(meshes, (x, y, 0), (x, y, top*.66), radius*.10)
+    base = [( .24, .47, .27), (.29, .51, .29), (.34, .53, .27)][index % 3]
+    for lobe in range(3):
+        angle = index*.73+lobe*2*np.pi/3
+        cx, cy = x+radius*.34*np.cos(angle), y+radius*.34*np.sin(angle)
+        cz = top*(.57+.035*(lobe % 2))
+        _branch(meshes, (x, y, top*.30), (cx, cy, cz), radius*.045)
+        _crown(meshes, (cx, cy, cz), (radius*.57, radius*.57, top*.30), rng, base)
+    _crown(meshes, (x-radius*.08, y+radius*.04, top*.76),
+           (radius*.62, radius*.62, top*.24), rng, base)
 
 
 def draw_city(ax, bounds, rects, circles, height):
@@ -122,7 +208,8 @@ def draw_city(ax, bounds, rects, circles, height):
         meshes = []
         _tree(meshes, x, y, radius, height, index)
         obstacles.append(((x-radius, y-radius, x+radius, y+radius), meshes))
-    scenery = Poly3DCollection([], zorder=1)
+    # Shared opaque faces must not reveal paving through antialiased seams.
+    scenery = Poly3DCollection([], zorder=1, antialiaseds=False)
     ax.add_collection3d(scenery, autolim=False)
 
     def clip_view(window):
