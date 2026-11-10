@@ -176,8 +176,9 @@ are percentages; coverage efficiency is in `[0,1]`. Metrics count executed
 planning calls, including a pending call that completes after termination.
 Errors and interrupted runs are labeled, not presented as successful missions.
 
-Replay reads these artifacts without importing planners. Arm/attitude glyphs
-are enlarged for field-scale visibility; the vertical display aspect is also
+Replay reads these artifacts without importing planners. Quadcopter glyphs with
+colored bodies, four rotor rings, and white nose stripes follow recorded attitude
+and are enlarged for field-scale visibility; the vertical display aspect is also
 exaggerated when needed, with its scale factor labeled. Aircraft
 positions, target, footprints, and obstacles use their recorded coordinates.
 The default camera follows the recorded target at 3× magnification with a

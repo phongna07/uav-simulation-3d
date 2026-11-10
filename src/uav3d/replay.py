@@ -50,7 +50,7 @@ def render(args):
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation, FFMpegWriter
     from .scene import draw_city
-    from scipy.spatial.transform import Rotation
+    from .aircraft import QuadcopterGlyph
     import imageio_ffmpeg
     directory = Path(args.directory)
     cfg = json.loads((directory/"config.json").read_text())
@@ -88,19 +88,16 @@ def render(args):
               cfg["scenario_definition"]["circles"], height)
     n = states.shape[1]
     colors = plt.cm.Set1(np.arange(n)%9)
-    trails,arms,footprints,markers = [],[],[],[]
+    # Enlarge only the aircraft illustration for field-scale readability.
+    glyph = max(1.,(xmax-xmin)*.008)
+    trails,aircraft,footprints = [],[],[]
     for i in range(n):
         trails.append(ax.plot([],[],[],color=colors[i],lw=1.5,label=f"UAV {i}")[0])
-        arms.append(ax.plot([],[],[],color=colors[i],lw=2)[0])
+        aircraft.append(QuadcopterGlyph(ax, colors[i], glyph))
         footprints.append(ax.plot([],[],[],color=colors[i],lw=.8,alpha=.6)[0])
-        markers.append(ax.plot([],[],[],marker="^",color=colors[i],ms=7,linestyle="")[0])
     target_line = ax.plot([],[],[],color="#f1f5f9",ls="--",lw=1)[0]
     target_marker = ax.plot([],[],[],marker="*",color="#dc2626",ms=12)[0]
     ax.legend(loc="upper left",fontsize=8)
-    # Enlarge physical arms for readability on field-scale maps, while rotating
-    # the glyph by the recorded physical attitude. Trajectories retain true scale.
-    glyph = max(1.,(xmax-xmin)*.008)
-    body = glyph*np.array([[-1,0,0],[1,0,0],[0,0,0],[0,-1,0],[0,1,0],[0,0,0],[0,0,.5]])
     half = cfg["params"]["VIEWING_RADIUS"]
     square = np.array([[-half,-half,0],[half,-half,0],[half,half,0],[-half,half,0],[-half,-half,0]])
     def line(artist,p):
@@ -111,9 +108,7 @@ def render(args):
         for i in range(n):
             stride = max(1,index//1000)
             line(trails[i],states[:index+1:stride,i,:3])
-            rotated = Rotation.from_quat(s[i,6:10]).apply(body)+s[i,:3]
-            line(arms[i],rotated)
-            line(markers[i],s[i,None,:3])
+            aircraft[i].update(s[i,:3], s[i,6:10])
             line(footprints[i],square+np.r_[s[i,:2],.05])
         line(target_line,targets[:index+1:max(1,index//1000)])
         line(target_marker,targets[index,None,:])
