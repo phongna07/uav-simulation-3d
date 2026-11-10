@@ -2,6 +2,46 @@
 import json
 from pathlib import Path
 import numpy as np
+from mpl_toolkits.mplot3d import Axes3D
+
+
+class TargetFollowAxes(Axes3D):
+    """Pan an orthographic camera without changing world axes or geometry."""
+
+    camera_target = None
+    camera_zoom = 1.
+
+    def get_proj(self):
+        projection = super().get_proj()
+        if self.camera_target is not None:
+            target = projection @ np.r_[self.camera_target, 1.]
+            # Translate the camera in its screen plane, preserving heading.
+            # Project the fixed world axes together with the scenery.
+            for axis in (0, 1):
+                projection[axis] = self.camera_zoom * (
+                    projection[axis] - target[axis]/target[3]*projection[3])
+        return projection
+
+
+def follow_camera(ax, target, bounds, max_z, zoom):
+    """Move the camera to the target, keeping world bounds and heading fixed.
+
+    Returns the vertical display scale and the nominal horizontal view window.
+    Scenery stays in world coordinates and must not be rebuilt from this window.
+    """
+    xmin, ymin, xmax, ymax = bounds
+    full_span = max(xmax-xmin, ymax-ymin)
+    span = full_span/zoom
+    display_z = max(max_z, .11*full_span)
+    scale = display_z/max_z
+    ax.set(xlim=(xmin, xmax), ylim=(ymin, ymax), zlim=(0, max_z))
+    ax.set_box_aspect((xmax-xmin, ymax-ymin, display_z))
+    ax.set_zticks(np.linspace(0, max_z, 3))
+    ax.camera_target = np.asarray(target, dtype=float).copy()
+    ax.camera_zoom = zoom
+    x, y = target[:2]
+    return scale, (x-span/2, y-span/2, x+span/2, y+span/2)
+
 
 
 def render(args):
@@ -9,7 +49,7 @@ def render(args):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation, FFMpegWriter
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    from .scene import draw_city
     from scipy.spatial.transform import Rotation
     import imageio_ffmpeg
     directory = Path(args.directory)
@@ -21,7 +61,10 @@ def render(args):
         raise ValueError("Replay output must end in .png or .mp4")
     output.parent.mkdir(parents=True,exist_ok=True)
     fig = plt.figure(figsize=(12,8),facecolor="#f3f5f9")
-    ax = fig.add_subplot(111,projection="3d",facecolor="#f3f5f9")
+    # Explicit layers: ground, depth-sorted obstacles, then aircraft overlays.
+    # Automatic collection ordering can put the ground above whole buildings.
+    ax = fig.add_subplot(111, axes_class=TargetFollowAxes,
+                         facecolor="#f3f5f9", computed_zorder=False)
     xmin,ymin,xmax,ymax = cfg["params"]["WORLD_BOUNDS"]
     max_z = max(10.,float(states[:,:,2].max())*1.7)
     ax.set(xlim=(xmin,xmax),ylim=(ymin,ymax),zlim=(0,max_z),
@@ -31,31 +74,27 @@ def render(args):
     ax.set_box_aspect((xmax-xmin,ymax-ymin,display_z))
     ax.set_zticks(np.linspace(0,max_z,3))
     ax.view_init(elev=35,azim=-65)
+    following = getattr(args, "camera", "follow") == "follow"
+    zoom = getattr(args, "zoom", 3.)
+    if following:
+        ax.view_init(elev=55, azim=-65)
+        ax.set_proj_type("ortho")
+    ax.grid(False)
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        axis.pane.fill = False
+        axis.pane.set_edgecolor("#d6dce3")
     height = max(5.,float(states[:,:,2].max())*1.3)
-    def box(x,y,w,h):
-        v = np.array([[x,y,0],[x+w,y,0],[x+w,y+h,0],[x,y+h,0],
-                      [x,y,height],[x+w,y,height],[x+w,y+h,height],[x,y+h,height]])
-        faces = [[v[j] for j in face] for face in
-                 ((0,1,2,3),(4,5,6,7),(0,1,5,4),(1,2,6,5),(2,3,7,6),(3,0,4,7))]
-        ax.add_collection3d(Poly3DCollection(faces,facecolor="#8c9aaa",alpha=.35,
-                                            edgecolor="#607080",linewidth=.3))
-    for rect in cfg["scenario_definition"]["rects"]:
-        box(*rect)
-    for x,y,r in cfg["scenario_definition"]["circles"]:
-        a = np.linspace(0,2*np.pi,24)
-        z = np.array([0,height])
-        ax.plot_surface(x+r*np.cos(a)[None,:]*np.ones((2,1)),
-                        y+r*np.sin(a)[None,:]*np.ones((2,1)),z[:,None]*np.ones((1,len(a))),
-                        color="#8c9aaa",alpha=.35)
+    draw_city(ax, (xmin,ymin,xmax,ymax), cfg["scenario_definition"]["rects"],
+              cfg["scenario_definition"]["circles"], height)
     n = states.shape[1]
-    colors = plt.cm.tab10(np.arange(n)%10)
+    colors = plt.cm.Set1(np.arange(n)%9)
     trails,arms,footprints,markers = [],[],[],[]
     for i in range(n):
         trails.append(ax.plot([],[],[],color=colors[i],lw=1.5,label=f"UAV {i}")[0])
         arms.append(ax.plot([],[],[],color=colors[i],lw=2)[0])
         footprints.append(ax.plot([],[],[],color=colors[i],lw=.8,alpha=.6)[0])
         markers.append(ax.plot([],[],[],marker="^",color=colors[i],ms=7,linestyle="")[0])
-    target_line = ax.plot([],[],[],color="#111827",ls="--",lw=1)[0]
+    target_line = ax.plot([],[],[],color="#f1f5f9",ls="--",lw=1)[0]
     target_marker = ax.plot([],[],[],marker="*",color="#dc2626",ms=12)[0]
     ax.legend(loc="upper left",fontsize=8)
     # Enlarge physical arms for readability on field-scale maps, while rotating
@@ -78,12 +117,17 @@ def render(args):
             line(footprints[i],square+np.r_[s[i,:2],.05])
         line(target_line,targets[:index+1:max(1,index//1000)])
         line(target_marker,targets[index,None,:])
+        if following:
+            scale, _ = follow_camera(ax, targets[index], (xmin,ymin,xmax,ymax), max_z, zoom)
+        else:
+            scale = z_scale
+        camera_label = f"Target-follow camera · zoom ×{zoom:g}" if following else "Full-map camera"
         ax.set_title(f"{cfg['scenario']} · {cfg['controller']} · {n} UAVs · t = {times[index]:.3f} s\n"
-                     f"Recorded motion · enlarged aircraft glyphs · vertical display scale ×{z_scale:.1f}",fontsize=11)
+                     f"{camera_label} · enlarged aircraft glyphs · vertical display scale ×{scale:.1f}",fontsize=11)
         return []
     if output.suffix.lower()==".png":
         update(times[-1] if args.time is None else args.time)
-        fig.savefig(output,dpi=180,bbox_inches="tight")
+        fig.savefig(output,dpi=180)
     else:
         matplotlib.rcParams["animation.ffmpeg_path"] = imageio_ffmpeg.get_ffmpeg_exe()
         frames = np.r_[np.arange(0,times[-1],args.speed/args.fps),times[-1]]

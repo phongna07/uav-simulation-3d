@@ -32,6 +32,10 @@ def parser():
     q.add_argument("--time",type=float,default=None,help="mission time for PNG; default: final recorded time")
     q.add_argument("--fps",type=int,default=24)
     q.add_argument("--speed",type=float,default=1.,help="mission seconds per video second")
+    q.add_argument("--camera",choices=("follow","overview"),default="follow",
+                   help="follow the target (default) or show the full map")
+    q.add_argument("--zoom",type=float,default=3.,
+                   help="follow camera magnification relative to the full map (default: 3)")
     return p
 
 
@@ -95,8 +99,11 @@ def main(argv=None):
         print(json.dumps(report(args.directory),indent=2))
         return 0
     if args.command=="replay":
+        import math
         if args.fps<=0 or args.speed<=0:
             p.error("--fps and --speed must be positive")
+        if not math.isfinite(args.zoom) or args.zoom<=0:
+            p.error("--zoom must be finite and positive")
         from .replay import render
         render(args)
         return 0

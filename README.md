@@ -45,6 +45,9 @@ uv run uav3d benchmark --drones 9 --duration 10 --out runs/comparison-nine
 uv run uav3d metrics runs/ours-demo
 uv run uav3d replay runs/ours-demo --out exports/ours.png
 uv run uav3d replay runs/ours-demo --out exports/ours.mp4 --speed 5 --fps 24
+# Follow the target at 4× magnification, or restore the full-map view.
+uv run uav3d replay runs/ours-demo --out exports/closeup.mp4 --zoom 4
+uv run uav3d replay runs/ours-demo --out exports/overview.mp4 --camera overview
 
 # Reuse a run's measured command delays; keep all experiment options identical.
 uv run uav3d run --duration 10 --timings-from runs/ours-demo --out runs/ours-repeated
@@ -177,8 +180,20 @@ Replay reads these artifacts without importing planners. Arm/attitude glyphs
 are enlarged for field-scale visibility; the vertical display aspect is also
 exaggerated when needed, with its scale factor labeled. Aircraft
 positions, target, footprints, and obstacles use their recorded coordinates.
-MP4 export uses an environment-managed FFmpeg binary. High-quality artistic
-rendering and a live viewer are outside v1.
+The default camera follows the recorded target at 3× magnification with a
+55-degree downward view and fixed heading. The target stays centered even near
+map edges; distant drones may leave the frame. Tracking pans the camera projection;
+world axis limits, ground paving, and obstacle coordinates stay fixed. `--zoom` adjusts magnification,
+and `--camera overview` restores the full-map view. Camera tracking does not
+change the trajectory or simulation.
+MP4 export uses an environment-managed FFmpeg binary. Replay uses dark gray
+running-bond brick paving, windowed buildings on rectangular obstacle footprints,
+and low-poly trees within circular obstacle footprints. Pavers are enlarged to
+remain visible at map scale. This decoration only affects replay: collision and
+LiDAR still use the original vertical obstacle columns, including the space
+around tree trunks and above the decorative roofs/crowns. High-quality artistic
+rendering and a live viewer are outside v1. Aircraft and trajectory overlays
+draw above the scenery to remain readable; they are not depth-occluded by buildings.
 
 ## Validation
 
