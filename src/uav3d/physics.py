@@ -6,6 +6,7 @@ import numpy as np
 class PhysicsBackend(Protocol):
     commands: np.ndarray
     def positions(self) -> np.ndarray: ...
+    def velocities(self) -> np.ndarray: ...
     def observations(self) -> tuple[np.ndarray, np.ndarray]: ...
     def step(self, duration: float) -> None: ...
     def snapshot(self) -> list[dict]: ...
@@ -38,6 +39,9 @@ class RotorPyBackend:
 
     def positions(self):
         return np.array([s["x"] for s in self.states])
+
+    def velocities(self):
+        return np.array([s["v"] for s in self.states])
 
     def observations(self):
         pv = np.array([np.r_[s["x"],s["v"]] for s in self.states])

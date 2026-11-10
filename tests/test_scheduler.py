@@ -64,3 +64,33 @@ def test_parallel_planners_see_only_pre_round_predictions():
     others=[[v for j,v in enumerate(row) if j!=i] for i,row in enumerate(seen)]
     assert others==[[1,2],[0,2],[0,1]]  # never a same-round plan
     assert [r.states_prediction[0,0] for r in robots]==[10,11,12]
+
+
+def test_plan_schedule_indexes_by_mission_time_then_brakes():
+    from uav3d.scheduler import PlanSchedule
+    s=PlanSchedule(.3,.1,np.array([[1.,0],[2,0],[3,0]]),2.5,5.)
+    assert s.command(.3,[0,0])==pytest.approx([1,0])
+    assert s.command(.4+1e-12,[0,0])==pytest.approx([2,0])  # boundary rounding
+    assert s.command(.55,[0,0])==pytest.approx([3,0])
+    assert s.command(.65,[1,0,0])==pytest.approx([-2.5,0])  # brake tail, u=-gain*v
+    assert s.command(.65,[10,0,0])==pytest.approx([-5,0])   # limited to umax
+    with pytest.raises(ValueError):
+        s.command(.2,[0,0])
+
+
+def test_late_plan_is_executed_from_its_current_step():
+    from uav3d.scheduler import PlanSchedule
+    physics=RotorPyBackend([[0,0,3]])
+    collision=CollisionWorld([],[],[-50,-50,50,50],.2)
+    sim=Simulation(physics,collision,np.array([[0,0,0],[1,0,0]]),1.,2.,.005)
+    sim.advance(.25)                    # plan released at 0, delivered 0.25 s late
+    sim.schedules[0]=PlanSchedule(0.,.1,np.array([[5.,0],[5,0],[0,0],[-5,0]]),2.5,5.)
+    sim.apply_schedules(sim.t)
+    assert physics.commands[0,:2]==pytest.approx([0,0])  # step 2, not U[0]
+    sim.advance(.35)
+    assert physics.commands[0,:2]==pytest.approx([-5,0])
+    sim=Simulation(physics,collision,np.array([[0,0,0],[1,0,0]]),1.,4.,.005)
+    sim.t=.35
+    sim.schedules[0]=PlanSchedule(0.,.1,np.zeros((4,2)),2.5,5.)
+    sim.advance(4.)                     # plan exhausted: brake tail settles to rest
+    assert np.linalg.norm(physics.velocities()[0,:2])<.05

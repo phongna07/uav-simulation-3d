@@ -60,9 +60,40 @@ def make_robots(cfg, starts):
                 raise ValueError(f"Invalid horizontal acceleration command: {u}")
             self.requested_command = u.copy()
 
+        def _backup_control(self):
+            # Flag the CONTINGENCY fallback: its command comes from Ub, not controls_prediction.
+            self.used_backup = True
+            return super()._backup_control()
+
     Robot._team_assign = {"step":None,"key":None,"assign":None}
     Robot._team_leader = {"step":None,"leader":None}
     return [AdapterRobot(i,np.r_[p,np.zeros(3)],p.copy()) for i,p in enumerate(starts)]
+
+
+def plan_schedule(robot, cfg, release, previous_backup):
+    """The time-indexed control sequence behind the command "ours" just issued.
+
+    Upstream applies controls_prediction[0] for one period and the rest of the
+    sequence on later periods; the CONTINGENCY fallback applies Ub, aligned with
+    the solve that produced it. Executing the whole sequence keeps the aircraft
+    on the trajectory the MPC verified, however late the next plan arrives.
+    """
+    from .scheduler import PlanSchedule
+    backup = getattr(robot,"_backup",None)
+    if backup is not None and backup is not previous_backup:
+        robot.backup_epoch = release      # a successful solve made a fresh backup branch
+    if getattr(robot,"used_backup",False):
+        start,controls = robot.backup_epoch,backup[1]
+    else:
+        # Fresh plan, braking prediction, or shifted (age_robot) previous plan: row 0 is now.
+        start,controls = release,robot.controls_prediction[:,:2]
+    tau = getattr(cfg,"ACCEL_TAU",0.)
+    schedule = PlanSchedule(start,cfg.TIMESTEP,np.array(controls,float,copy=True),
+                            1/(2*tau) if tau > 0 else 1/cfg.TIMESTEP,cfg.UMAX)
+    k = schedule.index(release+cfg.TIMESTEP/2)
+    if k < len(controls) and not np.allclose(controls[k],robot.requested_command[:2],atol=1e-9):
+        raise RuntimeError("Plan schedule does not reproduce the issued command")
+    return schedule
 
 
 def set_tracker_interval(tracker, dt):

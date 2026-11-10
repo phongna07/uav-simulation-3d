@@ -1,6 +1,7 @@
 """Pure scheduling rules, independent of host execution speed and physics."""
 import math
 from dataclasses import dataclass
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -68,3 +69,31 @@ def sequential_events(durations, release=0., round_index=0):
         end = t+duration
         yield PlanningEvent(round_index,i,release,t,end,duration,duration)
         t = end
+
+
+@dataclass(frozen=True)
+class PlanSchedule:
+    """A delivered horizontal control sequence, indexed by mission time.
+
+    controls[k] is applied on [start+k*period, start+(k+1)*period), as the plan
+    assumed, however late it was delivered or however long the next one takes.
+    After the last control the aircraft brakes towards rest, u = -gain*v, |u| <= umax.
+    """
+    start: float
+    period: float
+    controls: np.ndarray
+    brake_gain: float
+    umax: float
+
+    def index(self, t):
+        return math.floor((t-self.start)/self.period+1e-9)
+
+    def command(self, t, velocity):
+        k = self.index(t)
+        if k < 0:
+            raise ValueError("Plan schedule queried before its start")
+        if k < len(self.controls):
+            return np.array(self.controls[k], float)
+        u = -self.brake_gain*np.asarray(velocity, float)[:2]
+        n = np.linalg.norm(u)
+        return u if n <= self.umax else u*(self.umax/n)

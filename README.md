@@ -90,9 +90,17 @@ planning-call duration is `C_i`, command `i` arrives at:
 release_time + C_0 + C_1 + ... + C_i
 ```
 
-During these delays RotorPy and the target advance in simulation time. The
-previous horizontal command remains active; attitude and altitude control keep
-running. Results and predictions are published only on completion. Nominal
+During these delays RotorPy and the target advance in simulation time;
+attitude and altitude control keep running. For `ours`, each delivered result
+is the whole planned control sequence, executed by mission time: `U[k]` applies
+on `[release + k*dt, release + (k+1)*dt)`, so a late plan starts at its current
+step rather than `U[0]`, and the previous plan keeps playing until it arrives.
+A CONTINGENCY fallback plays the backup branch `Ub` aligned with the solve that
+produced it. Once a sequence runs out, the aircraft brakes towards rest
+(`u = -v/(2*ACCEL_TAU)`, at most `UMAX`). Holding one command for several
+periods would accelerate the aircraft past `VMAX`, after which the MPC's hard
+speed bound is infeasible. Other methods still hold their latest horizontal
+command. `config.json` records this as `command_execution`. Results and predictions are published only on completion. Nominal
 releases while the worker is busy are dropped, without creating a request
 backlog. Upstream shared leader/slot bookkeeping is retained in both modes;
 sequential mode also keeps upstream's access to already-completed same-round plans.

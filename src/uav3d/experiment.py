@@ -45,6 +45,8 @@ class Simulation:
         self.t = 0.
         self.hit = None
         n = len(backend.commands)
+        # Per-drone PlanSchedule; None holds backend.commands as delivered.
+        self.schedules = [None]*n
         self.status = np.zeros((n,3),int)
         self.times, self.aircraft, self.targets, self.commands, self.statuses = [],[],[],[],[]
         self.sample()
@@ -67,6 +69,14 @@ class Simulation:
             for seq,v in zip(seqs,values):
                 seq.append(v)
 
+    def apply_schedules(self, t):
+        if not any(s is not None for s in self.schedules):
+            return
+        velocities = self.backend.velocities()
+        for i,schedule in enumerate(self.schedules):
+            if schedule is not None:
+                self.backend.commands[i,:2] = schedule.command(t,velocities[i])
+
     def advance(self, until):
         until = min(until,self.horizon)
         while self.t < until-1e-12 and self.hit is None:
@@ -74,6 +84,9 @@ class Simulation:
             grid = (math.floor((self.t+1e-10)/self.sample_dt)+1)*self.sample_dt
             end = min(grid,until)
             dt = end-self.t
+            # The command in effect for this step: evaluated at its midpoint, so
+            # plan step boundaries on the physics grid are not subject to rounding.
+            self.apply_schedules(self.t+dt/2)
             old = self.backend.snapshot()
             p = self.backend.positions()
             self.backend.step(dt)
@@ -129,6 +142,9 @@ def run(args):
     if horizon <= 0:
         raise ValueError("Mission duration must be positive")
     backend = RotorPyBackend(starts,args.physics_dt)
+    # "ours" executes its whole plan by mission time; other methods hold the latest command.
+    follow_plan = cfg.CONTROLLER == "ours"
+    execution = "time_indexed_plan" if follow_plan else "hold_latest"
     replay_config = None
     timings = None
     if args.timings_from:
@@ -141,6 +157,8 @@ def run(args):
             raise ValueError("Timing replay requires matching scenario, controller, seed, starts and horizon")
         if replay_config.get("scheduling","sequential") != args.scheduling:
             raise ValueError("Timing replay requires matching --scheduling")
+        if replay_config.get("command_execution","hold_latest") != execution:
+            raise ValueError("Timing replay requires matching command execution")
         if replay_config["upstream_sha"] != _git_sha(upstream.UPSTREAM):
             raise ValueError("Timing replay requires matching upstream revision")
         for key in ("rects","circles","waypoints","speeds","params"):
@@ -156,7 +174,7 @@ def run(args):
                          params={k:v for k,v in vars(cfg).items() if k.isupper()},
                          horizon_s=horizon,full_target_duration_s=full_duration,
                          physics_dt=args.physics_dt,planning_period=cfg.TIMESTEP,
-                         scheduling=args.scheduling,
+                         scheduling=args.scheduling,command_execution=execution,
                          deployment="one_worker_per_uav" if args.scheduling=="parallel"
                          else "shared_ground_cpu_sequential",order="ascending_drone_id",
                          physics="rotorpy_hummingbird_cmd_acc",aerodynamics=False,
@@ -198,12 +216,16 @@ def run(args):
             # advances separately; no later UAV accidentally sees a future pose.
             def plan(i, robot, offset):
                 robot.requested_command = None
+                robot.used_backup = False
+                backup = getattr(robot,"_backup",None)
                 before = time.perf_counter()
                 robot.computeControlSignal(robots)
                 measured = time.perf_counter()-before
                 if robot.requested_command is None:
                     raise RuntimeError("Upstream failed to issue an acceleration command")
                 robot.prediction_epoch = release
+                # Built outside the timed call; the shifted buffers change next round.
+                robot.schedule = upstream.plan_schedule(robot,cfg,release,backup) if follow_plan else None
                 if timings is not None:
                     index = len(events)+offset
                     if index >= len(timings):
@@ -223,6 +245,10 @@ def run(args):
                                            requested_command=robot.requested_command.tolist(),delivered=False)
                 if sim.hit is None and event.completed_at <= horizon+1e-12:
                     backend.commands[event.drone] = robot.requested_command
+                    sim.schedules[event.drone] = robot.schedule
+                    if robot.schedule is not None:
+                        # Delivered late: continue at the plan step for now, not U[0].
+                        sim.apply_schedules(sim.t)
                     sim.status[event.drone] = (robot.mode == cfg.MODE_TRACK,robot.is_leader_role,
                                                getattr(robot,"mpc_fail_streak",0))
                     record["delivered"] = True
