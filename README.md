@@ -67,8 +67,22 @@ obstacle and pairwise clearance. Failure to find valid starts is explicit.
 
 ## Timing semantics
 
-The experiment represents **one shared ground-computer worker** for every
-algorithm, with UAVs processed in ascending ID. At each admitted nominal
+`--scheduling parallel` (the default) represents **one planning worker per UAV**.
+At each admitted nominal planning release, every planner observes the same
+team/target snapshot, including the other UAVs' predictions from before the
+round (never a same-round plan). With planning-call durations `C_i`, all
+commands arrive together at:
+
+```text
+release_time + d,   d = max(C_0, ..., C_N-1)
+```
+
+Host solves still run one after another, each measured single-threaded, so
+`d` models dedicated hardware rather than host parallelism. Events record each
+drone's own `C_i` as `execution_s`/`injected_delay_s`; `latency_s` is `d`.
+
+`--scheduling sequential` represents **one shared ground-computer worker** for
+every algorithm, with UAVs processed in ascending ID. At each admitted nominal
 planning release, every planner observes the same team/target snapshot. If its
 planning-call duration is `C_i`, command `i` arrives at:
 
@@ -80,8 +94,8 @@ During these delays RotorPy and the target advance in simulation time. The
 previous horizontal command remains active; attitude and altitude control keep
 running. Results and predictions are published only on completion. Nominal
 releases while the worker is busy are dropped, without creating a request
-backlog. Upstream shared leader/slot bookkeeping and sequential access to
-already-completed plans are retained.
+backlog. Upstream shared leader/slot bookkeeping is retained in both modes;
+sequential mode also keeps upstream's access to already-completed same-round plans.
 
 Host execution can be sequential and slower than real time. **Physics,
 logging, metrics, and rendering wall time are not injected as planner delay.**

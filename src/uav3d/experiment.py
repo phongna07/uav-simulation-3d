@@ -1,5 +1,5 @@
 """Single-run worker: host computation durations become mission-time events."""
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import importlib.metadata
 import json
 import logging
@@ -11,7 +11,7 @@ import subprocess
 import time
 import numpy as np
 from .physics import RotorPyBackend
-from .scheduler import PlanningEvent, next_release
+from .scheduler import PlanningEvent, next_release, parallel_events, plan_against_snapshot
 from . import upstream
 
 
@@ -139,6 +139,8 @@ def run(args):
                     replay_config["starts"],replay_config["horizon_s"])
         if expected != previous:
             raise ValueError("Timing replay requires matching scenario, controller, seed, starts and horizon")
+        if replay_config.get("scheduling","sequential") != args.scheduling:
+            raise ValueError("Timing replay requires matching --scheduling")
         if replay_config["upstream_sha"] != _git_sha(upstream.UPSTREAM):
             raise ValueError("Timing replay requires matching upstream revision")
         for key in ("rects","circles","waypoints","speeds","params"):
@@ -154,7 +156,9 @@ def run(args):
                          params={k:v for k,v in vars(cfg).items() if k.isupper()},
                          horizon_s=horizon,full_target_duration_s=full_duration,
                          physics_dt=args.physics_dt,planning_period=cfg.TIMESTEP,
-                         deployment="shared_ground_cpu_sequential",order="ascending_drone_id",
+                         scheduling=args.scheduling,
+                         deployment="one_worker_per_uav" if args.scheduling=="parallel"
+                         else "shared_ground_cpu_sequential",order="ascending_drone_id",
                          physics="rotorpy_hummingbird_cmd_acc",aerodynamics=False,
                          upstream_sha=_git_sha(upstream.UPSTREAM),
                          rotorpy_sha="40b09697a6a1596d404a67f459941d46a39eedd3",
@@ -192,8 +196,7 @@ def run(args):
                 robot.last_observation = release
             # Aircraft observations stay frozen for this round. The physical plant
             # advances separately; no later UAV accidentally sees a future pose.
-            for i,robot in enumerate(robots):
-                started = sim.t
+            def plan(i, robot, offset):
                 robot.requested_command = None
                 before = time.perf_counter()
                 robot.computeControlSignal(robots)
@@ -202,7 +205,7 @@ def run(args):
                     raise RuntimeError("Upstream failed to issue an acceleration command")
                 robot.prediction_epoch = release
                 if timings is not None:
-                    index = len(events)
+                    index = len(events)+offset
                     if index >= len(timings):
                         raise ValueError("Timing replay exhausted before mission completion")
                     recorded = timings[index]
@@ -213,25 +216,43 @@ def run(args):
                     delay = measured
                 if not np.isfinite(delay) or delay < 0:
                     raise ValueError("Invalid recorded computation duration")
-                event = PlanningEvent(round_index,i,release,started,started+delay,measured,delay)
+                return measured,delay
+
+            def deliver(event, robot):
                 record = asdict(event)|dict(queue_wait_s=event.queue_wait_s,latency_s=event.latency_s,
                                            requested_command=robot.requested_command.tolist(),delivered=False)
-                sim.advance(event.completed_at)
                 if sim.hit is None and event.completed_at <= horizon+1e-12:
-                    backend.commands[i] = robot.requested_command
-                    sim.status[i] = (robot.mode == cfg.MODE_TRACK,robot.is_leader_role,
-                                     getattr(robot,"mpc_fail_streak",0))
+                    backend.commands[event.drone] = robot.requested_command
+                    sim.status[event.drone] = (robot.mode == cfg.MODE_TRACK,robot.is_leader_role,
+                                               getattr(robot,"mpc_fail_streak",0))
                     record["delivered"] = True
                     plans.append(robot.states_prediction.copy())
                     plan_epochs.append([release,event.completed_at])
-                    plan_drones.append(i)
-                    sim.sample()
+                    plan_drones.append(event.drone)
                 events.append(record)
                 # Persist events as they complete, so partial runs are inspectable.
                 with (out/"events.jsonl").open("a") as f:
                     f.write(json.dumps(record)+"\n")
-                if sim.hit is not None or sim.t >= horizon-1e-12:
-                    break
+
+            if args.scheduling == "parallel":
+                # One worker per UAV: every planner sees the pre-round team predictions,
+                # and all commands arrive together after the slowest solve, d = max(C_i).
+                timed = plan_against_snapshot(robots,lambda i,robot: plan(i,robot,i))
+                round_events = list(parallel_events([d for _,d in timed],release,round_index))
+                sim.advance(round_events[0].completed_at)
+                for event,(measured,_),robot in zip(round_events,timed,robots):
+                    deliver(replace(event,execution_s=measured),robot)
+                sim.sample()
+            else:
+                for i,robot in enumerate(robots):
+                    started = sim.t
+                    measured,delay = plan(i,robot,0)
+                    event = PlanningEvent(round_index,i,release,started,started+delay,measured,delay)
+                    sim.advance(event.completed_at)
+                    deliver(event,robot)
+                    sim.sample()
+                    if sim.hit is not None or sim.t >= horizon-1e-12:
+                        break
             if sim.hit is not None or sim.t >= horizon-1e-12:
                 break
             release,missed = next_release(sim.t,release,cfg.TIMESTEP)
