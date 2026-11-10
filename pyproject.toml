@@ -1,0 +1,31 @@
+[project]
+name = "uav-simulation-3d"
+version = "0.1.0"
+description = "RotorPy plant adapter for latency-aware multi-UAV planning experiments"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "rotorpy",
+  "numpy>=1.26", "scipy>=1.11", "matplotlib>=3.8",
+  "casadi>=3.6", "pathfind>=0.1.2", "tqdm>=4.66", "numba>=0.60",
+  "pyyaml>=6.0", "pycddlib>=2.1,<3", "pyny3d==0.1.1", "pydecomp==2.0.0",
+  "imageio-ffmpeg>=0.6", "threadpoolctl>=3.5",
+]
+
+[project.scripts]
+uav3d = "uav3d.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv.sources]
+rotorpy = { git = "https://github.com/spencerfolk/rotorpy", rev = "40b09697a6a1596d404a67f459941d46a39eedd3" }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/uav3d"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

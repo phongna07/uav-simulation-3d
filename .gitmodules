@@ -1,0 +1,3 @@
+[submodule "motion_planning_MPC"]
+	path = motion_planning_MPC
+	url = https://github.com/thuhangkhuat/motion_planning_MPC.git
