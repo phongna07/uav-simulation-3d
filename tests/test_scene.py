@@ -48,20 +48,34 @@ def test_paving_does_not_paint_over_obstacles(elevation):
     np.testing.assert_allclose(actual[mask].astype(int), reference[mask].astype(int), atol=3)
 
 
-def test_follow_ground_sits_on_box_floor_and_is_clipped_to_view():
+@pytest.mark.parametrize("target", [(0, 0, 0), (900, 950, 0), (1000, 1000, 0)])
+def test_follow_ground_sits_on_box_floor_and_is_clipped_to_view(target):
     fig = plt.figure()
     ax = fig.add_subplot(axes_class=TargetFollowAxes)
     ax.view_init(elev=55, azim=-65)
     ax.set_proj_type("ortho")
     try:
-        _, window = follow_camera(ax, (900, 950, 0), (0, 0, 1000, 1000), 50, 3)
+        _, window = follow_camera(ax, target, (0, 0, 1000, 1000), 50, 3)
         clip = scene.draw_city(ax, (0, 0, 1000, 1000), [], [], 40)
         vertices = np.concatenate(clip(window))
         assert ax.get_zlim()[0] == 0
-        assert vertices[:, 0].min() >= ax.get_xlim()[0] - 1e-9
-        assert vertices[:, 0].max() <= min(1000, ax.get_xlim()[1]) + 1e-9
-        assert vertices[:, 1].min() >= ax.get_ylim()[0] - 1e-9
-        assert vertices[:, 1].max() <= min(1000, ax.get_ylim()[1]) + 1e-9
+        np.testing.assert_allclose(vertices[:, :2].min(axis=0), window[:2])
+        np.testing.assert_allclose(vertices[:, :2].max(axis=0), window[2:])
         np.testing.assert_array_equal(vertices[:, 2], 0)
+    finally:
+        plt.close(fig)
+
+
+def test_ground_extends_beyond_all_world_edges_without_changing_axes():
+    fig = plt.figure()
+    ax = fig.add_subplot(axes_class=TargetFollowAxes)
+    try:
+        follow_camera(ax, (0, 0, 0), (0, 0, 1000, 1000), 50, 3)
+        clip = scene.draw_city(ax, (0, 0, 1000, 1000), [], [], 40)
+        vertices = np.concatenate(clip((-1000, -1000, 2000, 2000)))
+        np.testing.assert_allclose(vertices[:, :2].min(axis=0), (-1000, -1000))
+        np.testing.assert_allclose(vertices[:, :2].max(axis=0), (2000, 2000))
+        assert ax.get_xlim() == (0, 1000)
+        assert ax.get_ylim() == (0, 1000)
     finally:
         plt.close(fig)

@@ -189,7 +189,9 @@ and `--camera overview` restores the full-map view. Camera tracking does not
 change the trajectory or simulation.
 MP4 export uses an environment-managed FFmpeg binary. Replay uses dark gray
 running-bond brick paving, windowed buildings on rectangular obstacle footprints,
-and low-poly trees within circular obstacle footprints. Pavers are enlarged to
+and low-poly trees within circular obstacle footprints. The paving extends one
+world span beyond every map edge, including negative X and Y, to keep ground
+visible around the origin and during camera tracking. Pavers are enlarged to
 remain visible at map scale. This decoration only affects replay: collision and
 LiDAR still use the original vertical obstacle columns, including the space
 around tree trunks and above the decorative roofs/crowns. High-quality artistic

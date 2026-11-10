@@ -90,13 +90,21 @@ def draw_city(ax, bounds, rects, circles, height):
     # Coarse pavers keep the bond visible on kilometre-scale overview maps and
     # bound mesh complexity. Geometry and colors are deterministic across frames.
     brick = max(xmax-xmin, ymax-ymin)/48
+    # Extend the decorative floor on every side of the simulation domain.
+    # A fixed world-span apron keeps paving under the panning camera near map
+    # edges, including negative X/Y, without moving the world axes or obstacles.
+    apron = 48*brick
+    ground_bounds = (xmin-apron, ymin-apron, xmax+apron, ymax+apron)
+    gxmin, gymin, gxmax, gymax = ground_bounds
     faces, colors = [], []
     palette = ["#414448", "#484b4f", "#3c3f43", "#4d5054", "#45484c"]
-    for row, y in enumerate(np.arange(ymin, ymax, brick)):
+    for row in range(-48, int(np.ceil((ymax-ymin)/brick))+48):
+        y = ymin+row*brick
         offset = brick if row % 2 else 0
-        for column, x in enumerate(np.arange(xmin-offset, xmax, 2*brick)):
-            left, right = max(xmin, x), min(xmax, x+2*brick)
-            top = min(ymax, y+brick)
+        for column in range(-24, int(np.ceil((xmax-xmin+offset)/(2*brick)))+24):
+            x = xmin-offset+column*2*brick
+            left, right = max(gxmin, x), min(gxmax, x+2*brick)
+            top = min(gymax, y+brick)
             faces.append([(left, y, 0), (right, y, 0),
                           (right, top, 0), (left, top, 0)])
             colors.append(palette[(row*7+column*3) % len(palette)])
@@ -146,5 +154,5 @@ def draw_city(ax, bounds, rects, circles, height):
         scenery.set_linewidth(list(widths))
         return kept
 
-    clip_view(bounds)
+    clip_view(ground_bounds)
     return clip_view
