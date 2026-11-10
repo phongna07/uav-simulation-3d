@@ -9,6 +9,31 @@ from uav3d.cli import main, parser
 from uav3d.replay import TargetFollowAxes, follow_camera
 
 
+@pytest.mark.parametrize("figsize", [(12, 8), (8, 12)])
+def test_camera_fills_frame_without_stretching_geometry(figsize):
+    fig = plt.figure(figsize=figsize, dpi=60)
+    ax = fig.add_axes((0, 0, 1, 1), axes_class=TargetFollowAxes)
+    ax.set_axis_off()
+    ax.view_init(elev=55, azim=-65)
+    ax.set_proj_type("ortho")
+    follow_camera(ax, [500, 500, 0], (0, 0, 1000, 1000), 50, 3)
+    try:
+        fig.canvas.draw()
+        np.testing.assert_allclose(ax.bbox.bounds, fig.bbox.bounds)
+        # Equal display-space steps along screen right/up must have equal pixel
+        # lengths (after accounting for intentional altitude exaggeration).
+        center = np.array([500., 500., 0.])
+        world_scale = ax._box_aspect / [1000, 1000, 50]
+        points = [center, center+.01*ax._view_u/world_scale,
+                  center+.01*ax._view_v/world_scale]
+        pixels = np.array([ax.transData.transform(
+            proj3d.proj_transform(*p, ax.get_proj())[:2]) for p in points])
+        assert np.linalg.norm(pixels[1]-pixels[0]) == pytest.approx(
+            np.linalg.norm(pixels[2]-pixels[0]))
+    finally:
+        plt.close(fig)
+
+
 def test_follow_keeps_target_projected_at_center_without_zoom_pumping():
     fig = plt.figure()
     ax = fig.add_subplot(axes_class=TargetFollowAxes)

@@ -6,10 +6,17 @@ from mpl_toolkits.mplot3d import Axes3D
 
 
 class TargetFollowAxes(Axes3D):
-    """Pan an orthographic camera without changing world axes or geometry."""
+    """Fill a rectangular viewport and pan without changing world geometry."""
 
     camera_target = None
     camera_zoom = 1.
+
+    def apply_aspect(self, position=None):
+        # Axes3D normally shrinks the viewport to a square, leaving side bars.
+        # Use the entire allocated rectangle; get_proj compensates its aspect.
+        if position is None:
+            position = self.get_position(original=True)
+        self._set_position(position, which="active")
 
     def get_proj(self):
         projection = super().get_proj()
@@ -20,6 +27,8 @@ class TargetFollowAxes(Axes3D):
             for axis in (0, 1):
                 projection[axis] = self.camera_zoom * (
                     projection[axis] - target[axis]/target[3]*projection[3])
+        # Keep aircraft, trees and paving proportional in a wide viewport.
+        projection[0] *= self.bbox.height / self.bbox.width
         return projection
 
 
@@ -49,6 +58,7 @@ def render(args):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation, FFMpegWriter
+    from matplotlib.patches import Rectangle
     from .scene import draw_city
     from .aircraft import QuadcopterGlyph
     import imageio_ffmpeg
@@ -63,8 +73,8 @@ def render(args):
     fig = plt.figure(figsize=(12,8),facecolor="#f3f5f9")
     # Explicit layers: ground, depth-sorted obstacles, then aircraft overlays.
     # Automatic collection ordering can put the ground above whole buildings.
-    ax = fig.add_subplot(111, axes_class=TargetFollowAxes,
-                         facecolor="#f3f5f9", computed_zorder=False)
+    ax = fig.add_axes((0, 0, 1, 1), axes_class=TargetFollowAxes,
+                      facecolor="#f3f5f9", computed_zorder=False)
     xmin,ymin,xmax,ymax = cfg["params"]["WORLD_BOUNDS"]
     max_z = max(10.,float(states[:,:,2].max())*1.7)
     ax.set(xlim=(xmin,xmax),ylim=(ymin,ymax),zlim=(0,max_z),
@@ -79,10 +89,12 @@ def render(args):
     if following:
         ax.view_init(elev=55, azim=-65)
         ax.set_proj_type("ortho")
-    ax.grid(False)
-    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
-        axis.pane.fill = False
-        axis.pane.set_edgecolor("#d6dce3")
+    ax.set_axis_off()
+    # Figure overlays do not reserve space or shrink the scenery viewport.
+    fig.add_artist(Rectangle((0, .925), 1, .075, transform=fig.transFigure,
+                             facecolor="white", edgecolor="none", zorder=10))
+    title = fig.text(.5, .988, "", ha="center", va="top", fontsize=11,
+                     color="#111111", zorder=11)
     height = max(5.,float(states[:,:,2].max())*1.3)
     draw_city(ax, (xmin,ymin,xmax,ymax), cfg["scenario_definition"]["rects"],
               cfg["scenario_definition"]["circles"], height)
@@ -97,7 +109,7 @@ def render(args):
         footprints.append(ax.plot([],[],[],color=colors[i],lw=.8,alpha=.6)[0])
     target_line = ax.plot([],[],[],color="#f1f5f9",ls="--",lw=1)[0]
     target_marker = ax.plot([],[],[],marker="*",color="#dc2626",ms=12)[0]
-    ax.legend(loc="upper left",fontsize=8)
+    ax.legend(loc="upper left", bbox_to_anchor=(.008, .915), fontsize=8)
     half = cfg["params"]["VIEWING_RADIUS"]
     square = np.array([[-half,-half,0],[half,-half,0],[half,half,0],[-half,half,0],[-half,-half,0]])
     def line(artist,p):
@@ -117,8 +129,8 @@ def render(args):
         else:
             scale = z_scale
         camera_label = f"Target-follow camera · zoom ×{zoom:g}" if following else "Full-map camera"
-        ax.set_title(f"{cfg['scenario']} · {cfg['controller']} · {n} UAVs · t = {times[index]:.3f} s\n"
-                     f"{camera_label} · enlarged aircraft glyphs · vertical display scale ×{scale:.1f}",fontsize=11)
+        title.set_text(f"{cfg['scenario']} · {cfg['controller']} · {n} UAVs · t = {times[index]:.3f} s\n"
+                       f"{camera_label} · enlarged aircraft glyphs · vertical display scale ×{scale:.1f}")
         return []
     if output.suffix.lower()==".png":
         update(times[-1] if args.time is None else args.time)

@@ -187,6 +187,9 @@ map edges; distant drones may leave the frame. Tracking pans the camera projecti
 world axis limits, ground paving, and obstacle coordinates stay fixed. `--zoom` adjusts magnification,
 and `--camera overview` restores the full-map view. Camera tracking does not
 change the trajectory or simulation.
+The scenery viewport fills the entire output frame without stretching the map;
+the title sits on an opaque white overlay at the top and the UAV legend sits
+below it. World axes and their labels are hidden for a clean video frame.
 MP4 export uses an environment-managed FFmpeg binary. Replay uses dark gray
 running-bond brick paving and buildings on rectangular obstacle footprints
 with framed glass, entrances, parapets, and rooftop solar panels,
