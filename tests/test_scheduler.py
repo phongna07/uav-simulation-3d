@@ -38,3 +38,29 @@ def test_collision_during_pending_solve_stops_before_delivery():
     assert sim.hit["reason"]=="obstacle_rectangle"
     assert sim.t==pytest.approx(.08,abs=1e-6)
     assert not physics.commands.any()
+
+
+def test_parallel_round_delivers_together_after_slowest():
+    from uav3d.scheduler import parallel_events
+    events=list(parallel_events([.04,.15,.08],release=.3,round_index=2))
+    assert [e.started_at for e in events]==pytest.approx([.3,.3,.3])
+    assert [e.completed_at for e in events]==pytest.approx([.45,.45,.45])
+    assert [e.queue_wait_s for e in events]==pytest.approx([0,0,0])
+    assert [e.injected_delay_s for e in events]==pytest.approx([.04,.15,.08])
+    with pytest.raises(ValueError):
+        list(parallel_events([.1,float("nan")]))
+
+
+def test_parallel_planners_see_only_pre_round_predictions():
+    from types import SimpleNamespace
+    from uav3d.scheduler import plan_against_snapshot
+    robots=[SimpleNamespace(states_prediction=np.full((3,2),float(i))) for i in range(3)]
+    seen=[]
+    def plan(i,robot):
+        seen.append([float(r.states_prediction[0,0]) for r in robots])
+        robot.states_prediction=np.full((3,2),10.+i)  # fresh plan
+        return i
+    assert plan_against_snapshot(robots,plan)==[0,1,2]
+    others=[[v for j,v in enumerate(row) if j!=i] for i,row in enumerate(seen)]
+    assert others==[[1,2],[0,2],[0,1]]  # never a same-round plan
+    assert [r.states_prediction[0,0] for r in robots]==[10,11,12]

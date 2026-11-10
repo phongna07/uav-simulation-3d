@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 from . import CONTROLLERS
+from .scheduler import SCHEDULES
 
 
 def parser():
@@ -22,6 +23,9 @@ def parser():
         q.add_argument("--physics-dt",type=float,default=.005)
         q.add_argument("--out",help="new output directory (must not already exist)")
         q.add_argument("--timings-from",help="run directory containing previously measured delays")
+        q.add_argument("--scheduling",choices=SCHEDULES,default="parallel",
+                       help="parallel (default): one worker per UAV, all commands delivered after "
+                            "the slowest solve; sequential: one shared worker, delays accumulate")
         if name=="benchmark":
             q.add_argument("--controllers",nargs="+",choices=CONTROLLERS,default=list(CONTROLLERS))
     q = sub.add_parser("metrics",help="recompute timestamp-based metrics from recorded data")
@@ -42,7 +46,7 @@ def parser():
 def worker_command(args, controller, output):
     command = [sys.executable,"-m","uav3d.cli","_worker","--scenario",args.scenario,
                "--controller",controller,"--seed",str(args.seed),"--physics-dt",str(args.physics_dt),
-               "--out",str(output)]
+               "--scheduling",args.scheduling,"--out",str(output)]
     for name in ("drones","duration","timings_from"):
         value = getattr(args,name)
         if value is not None:

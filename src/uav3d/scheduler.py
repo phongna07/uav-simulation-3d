@@ -28,6 +28,38 @@ def next_release(completed, released, period):
     return tick*period, tick-round(released/period)-1
 
 
+SCHEDULES = ("parallel", "sequential")
+
+
+def parallel_events(durations, release=0., round_index=0):
+    """One worker per UAV: all start at release, all deliver at release+max(C_i)."""
+    durations = list(durations)
+    for duration in durations:
+        if not math.isfinite(duration) or duration < 0:
+            raise ValueError("Planning duration must be finite and nonnegative")
+    end = release+max(durations, default=0.)
+    for i, duration in enumerate(durations):
+        yield PlanningEvent(round_index,i,release,release,end,duration,duration)
+
+
+def plan_against_snapshot(robots, plan):
+    """Call plan(i, robot) for each robot while every other robot exposes the
+    states_prediction it had before the round, as truly concurrent planners
+    would see. Each robot's fresh prediction is published after all return."""
+    before = [None if r.states_prediction is None else r.states_prediction.copy() for r in robots]
+    fresh = [r.states_prediction for r in robots]
+    results = []
+    try:
+        for i, robot in enumerate(robots):
+            results.append(plan(i, robot))
+            fresh[i] = robot.states_prediction
+            robot.states_prediction = before[i]
+    finally:
+        for robot, prediction in zip(robots, fresh):
+            robot.states_prediction = prediction
+    return results
+
+
 def sequential_events(durations, release=0., round_index=0):
     t = release
     for i, duration in enumerate(durations):
