@@ -208,8 +208,8 @@ def draw_city(ax, bounds, rects, circles, height):
         meshes = []
         _tree(meshes, x, y, radius, height, index)
         obstacles.append(((x-radius, y-radius, x+radius, y+radius), meshes))
-    # Shared opaque faces must not reveal paving through antialiased seams.
-    scenery = Poly3DCollection([], zorder=1, antialiaseds=False)
+    # Smooth moving window edges; matching edge strokes seal adjacent tiles.
+    scenery = Poly3DCollection([], zorder=1, antialiaseds=True, snap=False)
     ax.add_collection3d(scenery, autolim=False)
 
     def clip_view(window):
@@ -238,7 +238,7 @@ def draw_city(ax, bounds, rects, circles, height):
         scenery.set_verts(list(polys))
         scenery.set_facecolor(list(face_colors))
         scenery.set_edgecolor(list(edges))
-        scenery.set_linewidth(list(widths))
+        scenery.set_linewidth([max(width, .2) for width in widths])
         return kept
 
     clip_view(ground_bounds)

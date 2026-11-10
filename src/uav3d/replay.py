@@ -127,8 +127,15 @@ def render(args):
         matplotlib.rcParams["animation.ffmpeg_path"] = imageio_ffmpeg.get_ffmpeg_exe()
         frames = np.r_[np.arange(0,times[-1],args.speed/args.fps),times[-1]]
         animation = FuncAnimation(fig,update,frames=frames,interval=1000/args.fps,blit=False)
-        animation.save(output, dpi=160,
-                       writer=FFMpegWriter(fps=args.fps, codec="libx264", bitrate=6000,
-                                           extra_args=["-pix_fmt", "yuv420p"]))
+        # Supersample smoothed mesh faces, then filter to the delivery resolution.
+        # Direct rasterization makes subpixel window mullions jump between pixel
+        # columns during camera pans. Matching edge strokes seal facade tiles;
+        # downsampling the completed frame also stabilizes subpixel details.
+        animation.save(output, dpi=480,
+                       writer=FFMpegWriter(
+                           fps=args.fps, codec="libx264",
+                           extra_args=["-vf", "scale=iw/3:ih/3:flags=lanczos",
+                                       "-crf", "18", "-pix_fmt", "yuv420p",
+                                       "-movflags", "+faststart"]))
     plt.close(fig)
     print(output)
