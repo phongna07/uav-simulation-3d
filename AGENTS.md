@@ -11,7 +11,7 @@ and timing semantics, and `VALIDATION.md` for what has been validated.
 - Do not edit, add, delete, or reformat any file under `motion_planning_MPC/`.
 - Do not commit a new submodule pointer, check out another upstream revision,
   or rewrite upstream YAML/scenario files. Scenario changes are overlays built
-  in the adapter (as the nine-drone overlay already is).
+  in the adapter.
 - Do not monkey-patch upstream functions to change algorithm behavior.
 - Before finishing, confirm the submodule is clean and still pinned:
 
@@ -67,9 +67,8 @@ After **every** code change, before reporting done:
    uv run uav3d metrics runs/check-<short-name>
    ```
 
-   If the change touches a specific controller, scheduling mode, drone count, or
-   the benchmark path, validate that path too, e.g.
-   `--controller apf`, `--scheduling sequential`, `--drones 9`, or
+   If the change touches a specific controller or the benchmark path, validate
+   that path too, e.g. `--controller apf` or
    `uav3d benchmark --duration 2 --out runs/check-<short-name>-bench`.
 
 3. Report the outcome faithfully: tests passed/failed, whether the mission
@@ -107,8 +106,8 @@ default, so a long run must be started so that limit cannot apply:
 - Launch it with `run_in_background: true` and the maximum `timeout`
   (`7200000` ms) on the very first call. Chain `run`, `metrics`, and `replay`
   in that one command so nothing needs a second launch.
-- If a mission may exceed two hours (for example `--scheduling sequential` or
-  `--drones 9` at full length), detach it from the harness instead, with output
+- If a mission may exceed two hours (for example a scenario with a
+  large fleet at full length), detach it from the harness instead, with output
   redirected to a log file, then poll that log and `runs/<name>/` with short
   commands:
 

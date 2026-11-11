@@ -13,23 +13,22 @@ def test_cli_defaults():
     args=parser().parse_args(["run"])
     assert args.scenario=="scen1"
     assert args.controller=="ours"
-    assert args.drones is None
+    assert not hasattr(args,"drones") and not hasattr(args,"scheduling")
     assert parser().parse_args(["benchmark"]).controllers==[
         "ours","apf","pure_mpc","cbf_qp_lag","impc_ob_rec"]
 
 
-@pytest.mark.parametrize("count",[5,9])
-def test_scenario_preset_preserved_in_fresh_process(count):
+def test_scenario_preset_preserved_in_fresh_process():
     source=f'''
 import json,numpy as np,yaml
 from uav3d.upstream import load,UPSTREAM
-cfg,world,starts=load(drones={count})
+cfg,world,starts=load()
 raw=yaml.safe_load((UPSTREAM/'scenarios/scen1.yaml').read_text())
-assert np.array_equal(starts[:5],raw['starts'])
+assert np.array_equal(starts,raw['starts'])
 assert cfg.TIMESTEP==raw['params']['TIMESTEP']
 assert cfg.VMAX==raw['params']['VMAX']
 assert cfg.CONTROLLER=='ours'
-assert cfg.NUM_ROBOT=={count}
+assert cfg.NUM_ROBOT==len(raw['starts'])
 assert world.first_hit(starts,starts) is None
 assert not [m for level,m in cfg.validate_config() if level=='ERROR']
 print(json.dumps(starts.tolist()))

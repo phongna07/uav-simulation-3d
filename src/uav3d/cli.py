@@ -7,7 +7,6 @@ from pathlib import Path
 import subprocess
 import sys
 from . import CONTROLLERS
-from .scheduler import SCHEDULES
 
 
 def parser():
@@ -17,15 +16,11 @@ def parser():
         q = sub.add_parser(name,help="isolated experiment" if name=="run" else "all five methods" if name=="benchmark" else argparse.SUPPRESS)
         q.add_argument("--scenario",default="scen1")
         q.add_argument("--controller",choices=CONTROLLERS,default="ours")
-        q.add_argument("--drones",type=int,choices=(5,9),default=None)
         q.add_argument("--seed",type=int,default=0)
         q.add_argument("--duration",type=float,help="mission seconds; default: full target trajectory")
         q.add_argument("--physics-dt",type=float,default=.005)
         q.add_argument("--out",help="new output directory (must not already exist)")
         q.add_argument("--timings-from",help="run directory containing previously measured delays")
-        q.add_argument("--scheduling",choices=SCHEDULES,default="parallel",
-                       help="parallel (default): one worker per UAV, all commands delivered after "
-                            "the slowest solve; sequential: one shared worker, delays accumulate")
         q.add_argument("--compute-ratio",type=float,default=0.,
                        help="scale every measured planning duration by r before injecting it as "
                             "mission-time delay (e.g. 0.5: onboard computer twice as fast, 1: host "
@@ -57,9 +52,8 @@ def parser():
 def worker_command(args, controller, output):
     command = [sys.executable,"-m","uav3d.cli","_worker","--scenario",args.scenario,
                "--controller",controller,"--seed",str(args.seed),"--physics-dt",str(args.physics_dt),
-               "--scheduling",args.scheduling,
                "--compute-ratio",repr(args.compute_ratio),"--out",str(output)]
-    for name in ("drones","duration","timings_from"):
+    for name in ("duration","timings_from"):
         value = getattr(args,name)
         if value is not None:
             command += ["--"+name.replace("_","-"),str(value)]

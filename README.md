@@ -30,7 +30,8 @@ location if the adapter is installed elsewhere.
 ## Running
 
 ```bash
-# Full scen1 mission, ours, five drones (may take substantial wall time).
+# Full scen1 mission, ours (may take substantial wall time). The number of
+# drones is the number of `starts` in the scenario YAML.
 uv run uav3d run
 
 # Short run; duration is simulated mission time, not wall time.
@@ -38,9 +39,6 @@ uv run uav3d run --duration 10 --out runs/ours-demo
 
 # Sequential, isolated runs of all five algorithms, using the same preset.
 uv run uav3d benchmark --duration 10 --out runs/comparison
-
-# Explicit nine-drone scenario overlay; upstream YAML is never rewritten.
-uv run uav3d benchmark --drones 9 --duration 10 --out runs/comparison-nine
 
 uv run uav3d metrics runs/ours-demo
 uv run uav3d replay runs/ours-demo --out exports/ours.png
@@ -66,14 +64,14 @@ overwrites. A completed run or a detected collision exits successfully; the
 result artifact distinguishes them. A benchmark continues after a failed child
 process and returns nonzero if any worker failed.
 
-The nine-drone overlay preserves the original five starts and the already
-resolved map. Four new starts are chosen from a deterministic grid, ordered by
-distance from the original team centroid and then coordinates, and checked for
-obstacle and pairwise clearance. Failure to find valid starts is explicit.
+The fleet size is not a CLI option: it is inferred from the scenario's
+`starts` list (upstream sets `NUM_ROBOT = len(starts)`), so a different fleet
+needs a scenario with a different `starts` list.
 
 ## Timing semantics
 
-`--scheduling parallel` (the default) represents **one planning worker per UAV**.
+Scheduling is always **parallel**: one planning worker per UAV (there is no
+`--scheduling` option; `config.json` records `scheduling: parallel`).
 At each admitted nominal planning release, every planner observes the same
 team/target snapshot, including the other UAVs' predictions from before the
 round (never a same-round plan). With planning-call durations `C_i`, all
@@ -89,7 +87,7 @@ drone's own `C_i` as `execution_s`/`injected_delay_s`; `latency_s` is `d`.
 
 `--compute-ratio r` (default `0`) models faster (or slower) planning hardware,
 e.g. a powerful onboard computer: every measured duration is multiplied by `r`
-before it is injected as mission-time delay, so with parallel scheduling the
+before it is injected as mission-time delay, so the
 commands arrive at `release_time + r*max(C_i)`. `r=0.5` halves the delay;
 `r=0` delivers every command at its release (instantaneous planning: physics is
 frozen while the host solves, so no planning period is ever skipped); `r=1`
@@ -112,16 +110,7 @@ backup, so the aircraft stops along its current plan) and `accepted: false`
 `watchdog_braking_pct_*`, `watchdog_braking_episodes`, `upstream_stop_fallbacks`
 and `rejected_stale_plans`.
 
-`--scheduling sequential` represents **one shared ground-computer worker** for
-every algorithm, with UAVs processed in ascending ID. At each admitted nominal
-planning release, every planner observes the same team/target snapshot. If its
-planning-call duration is `C_i`, command `i` arrives at:
-
-```text
-release_time + C_0 + C_1 + ... + C_i
-```
-
-During these delays RotorPy and the target advance in simulation time;
+During planning delays RotorPy and the target advance in simulation time;
 attitude and altitude control keep running. Other methods hold their latest
 horizontal command. For `ours` (`command_execution: tracked_plan_with_watchdog`),
 each delivered result is the whole plan, followed by mission time at the
@@ -154,8 +143,7 @@ physics rate:
 These gains and ratios are adapter constants in `upstream.py`, recorded in
 `config.json` under `plan_tracking`. Results and predictions are published only on completion. Nominal
 releases while the worker is busy are dropped, without creating a request
-backlog. Upstream shared leader/slot bookkeeping is retained in both modes;
-sequential mode also keeps upstream's access to already-completed same-round plans.
+backlog. Upstream shared leader/slot bookkeeping is retained.
 
 Host execution can be sequential and slower than real time. **Physics,
 logging, metrics, and rendering wall time are not injected as planner delay.**
@@ -294,7 +282,7 @@ scenery. Aircraft glyphs switch layer as a whole, based on their centre.
 `uav3d collect` reads finished runs (`config.json`, `result.json`,
 `events.jsonl`, `trajectory.npz`) and never runs a planner. It writes
 `metrics/<preset>.xlsx`, `.csv` and `.md` (git-ignored), where `<preset>` is
-the scenario, `_<N>uav` when `--drones` was given, and `_<T>s` for a
+the scenario and `_<T>s` for a
 `--duration` shorter than the route or `_full_mission` otherwise (e.g.
 `scen1_150s`). Each file has one entry per algorithm: collecting a run
 replaces only its algorithm's row, so each file holds the latest run of every
@@ -315,16 +303,17 @@ entry says why. The other tables add run settings, safety (clearances,
 collision), formation, tracking distances, computation (fleet round time,
 latency, late delivery) and fallback/safety-layer counts; the Markdown and the
 XLSX *Definitions* sheet define every entry. Compare rows only when their
-compute ratio and scheduling match; `collect` warns when a file mixes them.
+compute ratio and scheduling match (runs recorded before sequential scheduling
+was removed may differ); `collect` warns when a file mixes them.
 
 ## Validation
 
 `uv run pytest -q` checks continuous collision detection, irregular timestamp
-metrics, cumulative delays, pending-command motion, failure during a pending
-solve, exact preset loading, deterministic nine-drone placement, estimator and
+metrics, parallel delivery delays, pending-command motion, failure during a pending
+solve, exact preset loading, estimator and
 prediction aging, hover, acceleration/braking, and 5 ms/2.5 ms convergence.
 
-Integration validation runs all five methods with both five and nine drones.
+Integration validation runs all five methods on the scenario's own fleet.
 These are short smoke experiments, not evidence of full-mission safety or
 paper-quality performance. The scalar CPU RotorPy implementation on this
 machine is slower than real time in these checks; simulator throughput is

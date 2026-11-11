@@ -41,7 +41,7 @@ def test_preset_name():
     cfg = dict(scenario="scen1",starts=[[0,0,0]]*5,horizon_s=150.,full_target_duration_s=400.)
     assert collect.preset_name(cfg) == "scen1_150s"
     assert collect.preset_name(cfg|dict(horizon_s=400.)) == "scen1_full_mission"
-    assert collect.preset_name(cfg|dict(horizon_s=2.5,requested_drones=9,starts=[[0,0,0]]*9)) == "scen1_9uav_2.5s"
+    assert collect.preset_name(cfg|dict(horizon_s=2.5,starts=[[0,0,0]]*9)) == "scen1_2.5s"
 
 
 def test_short_mission_marks_paper_metrics_unavailable(tmp_path):

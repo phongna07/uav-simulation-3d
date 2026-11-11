@@ -65,7 +65,7 @@ METRICS = [
     M("finished_utc","Run finished (UTC)",RUN,None,"Modification time of result.json"),
     M("uavs","UAVs",RUN,"{:d}","Number of UAVs"),
     M("seed","Seed",RUN,"{:d}","run --seed"),
-    M("scheduling","Scheduling",RUN,None,"run --scheduling"),
+    M("scheduling","Scheduling",RUN,None,"Recorded scheduling (parallel; older runs may be sequential)"),
     M("compute_ratio","Compute ratio r",RUN,"{:g}",
       "run --compute-ratio: mission-time delay = r x measured solve time (0: instantaneous)"),
     M("command_execution","Command execution",RUN,None,
@@ -156,10 +156,8 @@ ALGORITHM = "Algorithm"
 
 
 def preset_name(cfg):
-    """scenario [+ _<N>uav for --drones] + _<T>s, or _full_mission for the whole route."""
+    """scenario + _<T>s, or _full_mission for the whole route."""
     name = str(cfg["scenario"])
-    if cfg.get("requested_drones") is not None:
-        name += f"_{len(cfg['starts'])}uav"
     horizon,full = float(cfg["horizon_s"]),float(cfg.get("full_target_duration_s",cfg["horizon_s"]))
     return name+("_full_mission" if horizon >= full-1e-9 else f"_{horizon:g}s")
 

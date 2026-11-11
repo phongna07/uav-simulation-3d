@@ -1,19 +1,14 @@
 import numpy as np
 import pytest
-from uav3d.scheduler import sequential_events,next_release
+from uav3d.scheduler import next_release
 from uav3d.physics import RotorPyBackend
 from uav3d.collision import CollisionWorld
 from uav3d.experiment import Simulation
 
 
-def test_queue_and_grid():
-    events=list(sequential_events([.04,.08,.15]))
-    assert [e.completed_at for e in events]==pytest.approx([.04,.12,.27])
-    assert events[2].queue_wait_s==pytest.approx(.12)
+def test_release_grid():
     assert next_release(.27,0,.1)==pytest.approx((.3,2))
     assert next_release(.3,0,.1)==pytest.approx((.3,2))
-    with pytest.raises(ValueError):
-        list(sequential_events([-1]))
 
 
 def test_motion_continues_during_pending_solve():

@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[2]
 UPSTREAM = Path(os.environ.get("UAV3D_UPSTREAM", ROOT / "motion_planning_MPC"))
 
 
-def load(scenario="scen1", controller="ours", drones=None):
+def load(scenario="scen1", controller="ours"):
+    """Upstream config for a scenario; the drone count is len(cfg.STARTS)."""
     if "config" in sys.modules:
         raise RuntimeError("Use a fresh process for each scenario/controller experiment")
     os.environ["SCENARIO"] = scenario
@@ -24,28 +25,6 @@ def load(scenario="scen1", controller="ours", drones=None):
     world = CollisionWorld(cfg.RECTANGLE_OBSTACLES, cfg.OBSTACLES,
                            cfg.WORLD_BOUNDS, cfg.ROBOT_RADIUS)
     starts = cfg.STARTS.copy()
-    if drones is not None and drones != len(starts):
-        if drones != 9 or len(starts) != 5:
-            raise ValueError("Drone count must match the scenario, or expand five starts to nine")
-        xmin,ymin,xmax,ymax = cfg.WORLD_BOUNDS
-        spacing = max(cfg.GRID_RESOLUTION, 2*cfg.ROBOT_RADIUS+0.01)
-        xs,ys = np.meshgrid(np.arange(xmin+spacing,xmax,spacing),
-                            np.arange(ymin+spacing,ymax,spacing))
-        candidates = np.column_stack([xs.ravel(),ys.ravel()])
-        center = starts[:,:2].mean(axis=0)
-        order = np.lexsort((candidates[:,1],candidates[:,0],np.sum((candidates-center)**2,axis=1)))
-        points = list(starts)
-        for k in order:
-            p = np.r_[candidates[k],starts[0,2]]
-            if world.valid_start(p, points):
-                points.append(p)
-                if len(points) == drones:
-                    break
-        if len(points) != drones:
-            raise ValueError("Cannot place four additional drones safely on the resolved map")
-        starts = np.array(points)
-        cfg.STARTS, cfg.GOALS, cfg.NUM_ROBOT = starts, starts.copy(), drones
-        cfg.SCENARIO_DEF["starts"] = starts.tolist()
     return cfg, world, starts
 
 

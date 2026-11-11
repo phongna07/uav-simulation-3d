@@ -29,9 +29,6 @@ def next_release(completed, released, period):
     return tick*period, tick-round(released/period)-1
 
 
-SCHEDULES = ("parallel", "sequential")
-
-
 def scaled_delay(duration, ratio=1.):
     """Mission-time delay for a host-measured solve on hardware `1/ratio` times as fast.
 
@@ -71,16 +68,6 @@ def plan_against_snapshot(robots, plan):
         for robot, prediction in zip(robots, fresh):
             robot.states_prediction = prediction
     return results
-
-
-def sequential_events(durations, release=0., round_index=0):
-    t = release
-    for i, duration in enumerate(durations):
-        if not math.isfinite(duration) or duration < 0:
-            raise ValueError("Planning duration must be finite and nonnegative")
-        end = t+duration
-        yield PlanningEvent(round_index,i,release,t,end,duration,duration)
-        t = end
 
 
 

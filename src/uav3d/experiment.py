@@ -11,7 +11,7 @@ import subprocess
 import time
 import numpy as np
 from .physics import RotorPyBackend
-from .scheduler import PlanningEvent, next_release, parallel_events, plan_against_snapshot, scaled_delay
+from .scheduler import next_release, parallel_events, plan_against_snapshot, scaled_delay
 from . import upstream
 
 
@@ -129,7 +129,7 @@ def run(args):
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     np.random.seed(args.seed)
     init_start = time.perf_counter()
-    cfg,world,starts = upstream.load(args.scenario,args.controller,args.drones)
+    cfg,world,starts = upstream.load(args.scenario,args.controller)
     issues = cfg.validate_config()
     for level,message in issues:
         if level != "INFO":
@@ -158,8 +158,8 @@ def run(args):
                     replay_config["starts"],replay_config["horizon_s"])
         if expected != previous:
             raise ValueError("Timing replay requires matching scenario, controller, seed, starts and horizon")
-        if replay_config.get("scheduling","sequential") != args.scheduling:
-            raise ValueError("Timing replay requires matching --scheduling")
+        if replay_config.get("scheduling","sequential") != "parallel":
+            raise ValueError("Timing replay requires a source run with parallel scheduling")
         if replay_config.get("command_execution","hold_latest") != execution:
             raise ValueError("Timing replay requires matching command execution")
         if replay_config["upstream_sha"] != _git_sha(upstream.UPSTREAM):
@@ -181,8 +181,8 @@ def run(args):
                          params={k:v for k,v in vars(cfg).items() if k.isupper()},
                          horizon_s=horizon,full_target_duration_s=full_duration,
                          physics_dt=args.physics_dt,planning_period=cfg.TIMESTEP,
-                         scheduling=args.scheduling,command_execution=execution,
-                         compute_ratio=ratio,requested_drones=args.drones,
+                         scheduling="parallel",command_execution=execution,
+                         compute_ratio=ratio,
                          plan_tracking=dict(kp=upstream.TRACK_KP,kd=upstream.TRACK_KD,
                                             stop_accel_ratio=upstream.STOP_ACCEL_RATIO,
                                             track_accel_ratio=upstream.TRACK_ACCEL_RATIO,
@@ -190,8 +190,7 @@ def run(args):
                                             accept_position_radius_ratio=upstream.ACCEPT_POSITION_RADIUS_RATIO,
                                             accept_speed_error=upstream.ACCEPT_SPEED_ERROR)
                          if follow_plan else None,
-                         deployment="one_worker_per_uav" if args.scheduling=="parallel"
-                         else "shared_ground_cpu_sequential",order="ascending_drone_id",
+                         deployment="one_worker_per_uav",order="ascending_drone_id",
                          physics="rotorpy_hummingbird_cmd_acc",aerodynamics=False,
                          upstream_sha=_git_sha(upstream.UPSTREAM),
                          rotorpy_sha="40b09697a6a1596d404a67f459941d46a39eedd3",
@@ -229,7 +228,7 @@ def run(args):
                 robot.last_observation = release
             # Aircraft observations stay frozen for this round. The physical plant
             # advances separately; no later UAV accidentally sees a future pose.
-            def plan(i, robot, offset):
+            def plan(i, robot):
                 robot.requested_command = None
                 robot.used_backup = False
                 backup = getattr(robot,"_backup",None)
@@ -243,7 +242,7 @@ def run(args):
                 robot.schedule,robot.stop_current = (upstream.plan_schedule(robot,cfg,release,backup)
                                                      if follow_plan else (None,False))
                 if timings is not None:
-                    index = len(events)+offset
+                    index = len(events)+i
                     if index >= len(timings):
                         raise ValueError("Timing replay exhausted before mission completion")
                     recorded = timings[index]
@@ -296,25 +295,14 @@ def run(args):
                 with (out/"events.jsonl").open("a") as f:
                     f.write(json.dumps(record)+"\n")
 
-            if args.scheduling == "parallel":
-                # One worker per UAV: every planner sees the pre-round team predictions,
-                # and all commands arrive together after the slowest solve, d = max(C_i).
-                timed = plan_against_snapshot(robots,lambda i,robot: plan(i,robot,i))
-                round_events = list(parallel_events([d for _,d in timed],release,round_index))
-                sim.advance(round_events[0].completed_at)
-                for event,(measured,_),robot in zip(round_events,timed,robots):
-                    deliver(replace(event,execution_s=measured),robot)
-                sim.sample()
-            else:
-                for i,robot in enumerate(robots):
-                    started = sim.t
-                    measured,delay = plan(i,robot,0)
-                    event = PlanningEvent(round_index,i,release,started,started+delay,measured,delay)
-                    sim.advance(event.completed_at)
-                    deliver(event,robot)
-                    sim.sample()
-                    if sim.hit is not None or sim.t >= horizon-1e-12:
-                        break
+            # One worker per UAV: every planner sees the pre-round team predictions,
+            # and all commands arrive together after the slowest solve, d = max(C_i).
+            timed = plan_against_snapshot(robots,lambda i,robot: plan(i,robot))
+            round_events = list(parallel_events([d for _,d in timed],release,round_index))
+            sim.advance(round_events[0].completed_at)
+            for event,(measured,_),robot in zip(round_events,timed,robots):
+                deliver(replace(event,execution_s=measured),robot)
+            sim.sample()
             if sim.hit is not None or sim.t >= horizon-1e-12:
                 break
             release,missed = next_release(sim.t,release,cfg.TIMESTEP)
