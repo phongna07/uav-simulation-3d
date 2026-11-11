@@ -243,3 +243,17 @@ def draw_city(ax, bounds, rects, circles, height):
 
     clip_view(ground_bounds)
     return clip_view
+
+
+def occluder_bounds(rects, circles, height):
+    """Axis-aligned volumes enclosing every decorative obstacle mesh.
+
+    Used only by replay layering: a volume encloses its mesh (parapets and the
+    rooftop plant reach 1.09 × height; tree crowns stay inside their disk and
+    below ``height``), so a view ray that misses the volume misses the mesh.
+    """
+    boxes = [((x, y, 0.), (x+width, y+depth, height*1.09))
+             for x, y, width, depth in rects]
+    boxes += [((x-radius, y-radius, 0.), (x+radius, y+radius, height))
+              for x, y, radius in circles]
+    return np.asarray(boxes, dtype=float).reshape(-1, 2, 3)

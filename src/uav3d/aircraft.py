@@ -40,6 +40,13 @@ class QuadcopterGlyph:
         # A white canopy/nose stripe gives an attitude cue without an arrow.
         self.nose = scale * np.array([[.02, 0, .20], [.40, 0, .20]])
         self.indicator, = ax.plot([], [], [], color="#f8fafc", lw=1.6, zorder=8)
+        self._layers = [(artist, artist.get_zorder()) for artist in
+                        (self.shell, self.arms, self.rotors, self.indicator)]
+
+    def set_layer(self, offset=0., scale=1.):
+        """Move the whole glyph to another layer, keeping its internal order."""
+        for artist, zorder in self._layers:
+            artist.set_zorder(offset+scale*zorder)
 
     def update(self, position, quaternion):
         rotation = Rotation.from_quat(quaternion)

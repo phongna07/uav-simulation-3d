@@ -52,6 +52,81 @@ def follow_camera(ax, target, bounds, max_z, zoom):
     return scale, (x-span/2, y-span/2, x+span/2, y+span/2)
 
 
+# Layering with ``computed_zorder=False``: paving (0) < hidden overlays
+# (HIDDEN_LAYER) < depth-sorted scenery (1) < visible overlays (>= 2).
+# Overlay parts whose view ray is blocked by an obstacle volume are drawn
+# beneath the scenery, so the obstacle covers them where its mesh is solid
+# and they still show through gaps (e.g. between tree crown lobes).
+HIDDEN_LAYER = .5
+
+
+def view_directions(projection, points):
+    """Unit world-space directions from each point toward the camera."""
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    homogeneous = np.c_[points, np.ones(len(points))]
+    screen = homogeneous @ projection.T
+    screen = screen/screen[:, 3:]
+    # Smaller projected depth is nearer the camera (ortho and perspective).
+    screen[:, 2] -= 1e-3
+    nearer = screen @ np.linalg.inv(projection).T
+    direction = nearer[:, :3]/nearer[:, 3:] - points
+    return direction/np.linalg.norm(direction, axis=1, keepdims=True)
+
+
+def occluded(projection, points, boxes):
+    """True where the ray from a point to the camera crosses an obstacle box."""
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    if len(points) == 0 or len(boxes) == 0:
+        return np.zeros(len(points), dtype=bool)
+    direction = view_directions(projection, points)
+    direction[np.abs(direction) < 1e-12] = 1e-12
+    with np.errstate(invalid="ignore", divide="ignore"):
+        lower = (boxes[None, :, 0] - points[:, None])/direction[:, None]
+        upper = (boxes[None, :, 1] - points[:, None])/direction[:, None]
+    near = np.minimum(lower, upper).max(axis=2)
+    far = np.maximum(lower, upper).min(axis=2)
+    return (far >= np.maximum(near, 0.)).any(axis=1)
+
+
+class DepthSplitLine:
+    """A 3D polyline drawn above the scenery only where nothing occludes it."""
+
+    def __init__(self, ax, zorder=2., segment=None, **style):
+        self.segment = segment  # optional maximum segment length for testing
+        self.front = ax.plot([], [], [], zorder=zorder, **style)[0]
+        style.pop("label", None)
+        self.back = ax.plot([], [], [], zorder=HIDDEN_LAYER+zorder/100, **style)[0]
+
+    def _subdivide(self, points):
+        if self.segment is None or len(points) < 2:
+            return points
+        pieces = [points[:1]]
+        for start, end in zip(points[:-1], points[1:]):
+            count = max(1, int(np.ceil(np.linalg.norm(end-start)/self.segment)))
+            pieces.append(start + np.outer(np.arange(1, count+1)/count, end-start))
+        return np.concatenate(pieces)
+
+    def update(self, points, projection, boxes):
+        points = self._subdivide(np.asarray(points, dtype=float).reshape(-1, 3))
+        if len(points) < 2:
+            hidden = occluded(projection, points, boxes)
+            for artist, mask in ((self.front, ~hidden), (self.back, hidden)):
+                p = points[mask]
+                artist.set_data_3d(p[:, 0], p[:, 1], p[:, 2])
+            return
+        hidden = occluded(projection, (points[:-1]+points[1:])/2, boxes)
+        # Consecutive segments of one layer stay one path (so dash patterns
+        # continue); a NaN row breaks the path where the layer changes.
+        breaks = np.flatnonzero(np.diff(hidden)) + 1
+        runs = zip(np.r_[0, breaks], np.r_[breaks, len(hidden)])
+        paths = {False: [], True: []}
+        gap = np.full((1, 3), np.nan)
+        for start, stop in runs:
+            paths[bool(hidden[start])] += [points[start:stop+1], gap]
+        for artist, key in ((self.front, False), (self.back, True)):
+            p = np.concatenate(paths[key]) if paths[key] else np.empty((0, 3))
+            artist.set_data_3d(p[:, 0], p[:, 1], p[:, 2])
+
 
 def render(args):
     import matplotlib
@@ -59,7 +134,7 @@ def render(args):
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation, FFMpegWriter
     from matplotlib.patches import Rectangle
-    from .scene import draw_city
+    from .scene import draw_city, occluder_bounds
     from .aircraft import QuadcopterGlyph
     import imageio_ffmpeg
     directory = Path(args.directory)
@@ -98,36 +173,45 @@ def render(args):
     height = max(5.,float(states[:,:,2].max())*1.3)
     draw_city(ax, (xmin,ymin,xmax,ymax), cfg["scenario_definition"]["rects"],
               cfg["scenario_definition"]["circles"], height)
+    boxes = occluder_bounds(cfg["scenario_definition"]["rects"],
+                            cfg["scenario_definition"]["circles"], height)
     n = states.shape[1]
     colors = plt.cm.Set1(np.arange(n)%9)
     # Enlarge only the aircraft illustration for field-scale readability.
     glyph = max(1.,(xmax-xmin)*.008)
+    half = cfg["params"]["VIEWING_RADIUS"]
     trails,aircraft,footprints = [],[],[]
     for i in range(n):
-        trails.append(ax.plot([],[],[],color=colors[i],lw=1.5,label=f"UAV {i}")[0])
+        trails.append(DepthSplitLine(ax,color=colors[i],lw=1.5,label=f"UAV {i}"))
         aircraft.append(QuadcopterGlyph(ax, colors[i], glyph))
-        footprints.append(ax.plot([],[],[],color=colors[i],lw=.8,alpha=.6)[0])
-    target_line = ax.plot([],[],[],color="#f1f5f9",ls="--",lw=1)[0]
-    target_marker = ax.plot([],[],[],marker="*",color="#dc2626",ms=12)[0]
-    ax.legend(loc="upper left", bbox_to_anchor=(.008, .915), fontsize=8)
-    half = cfg["params"]["VIEWING_RADIUS"]
+        # Long square edges are split so an obstacle can hide part of one.
+        footprints.append(DepthSplitLine(ax,segment=half/8,color=colors[i],lw=.8,alpha=.6))
+    target_line = DepthSplitLine(ax,color="#f1f5f9",ls="--",lw=1)
+    target_marker = DepthSplitLine(ax,marker="*",color="#dc2626",ms=12,ls="none")
+    ax.legend(handles=[trail.front for trail in trails],
+              loc="upper left", bbox_to_anchor=(.008, .915), fontsize=8)
     square = np.array([[-half,-half,0],[half,-half,0],[half,half,0],[-half,half,0],[-half,-half,0]])
-    def line(artist,p):
-        artist.set_data_3d(p[:,0],p[:,1],p[:,2])
     def update(t):
         index = max(0,min(len(times)-1,np.searchsorted(times,t,side="right")-1))
         s = states[index]
-        for i in range(n):
-            stride = max(1,index//1000)
-            line(trails[i],states[:index+1:stride,i,:3])
-            aircraft[i].update(s[i,:3], s[i,6:10])
-            line(footprints[i],square+np.r_[s[i,:2],.05])
-        line(target_line,targets[:index+1:max(1,index//1000)])
-        line(target_marker,targets[index,None,:])
+        # Set the camera first: occlusion is tested against this frame's view.
         if following:
             scale, _ = follow_camera(ax, targets[index], (xmin,ymin,xmax,ymax), max_z, zoom)
         else:
             scale = z_scale
+        projection = ax.get_proj()
+        stride = max(1,index//1000)
+        hidden = occluded(projection, s[:,:3], boxes)
+        for i in range(n):
+            # Keep the newest sample so the trail reaches the aircraft.
+            trails[i].update(np.r_[states[:index:stride,i,:3], s[None,i,:3]],
+                             projection, boxes)
+            aircraft[i].update(s[i,:3], s[i,6:10])
+            aircraft[i].set_layer(*((HIDDEN_LAYER, .01) if hidden[i] else (0., 1.)))
+            footprints[i].update(square+np.r_[s[i,:2],.05], projection, boxes)
+        target_line.update(np.r_[targets[:index:stride], targets[None,index]],
+                           projection, boxes)
+        target_marker.update(targets[index,None,:], projection, boxes)
         camera_label = f"Target-follow camera · zoom ×{zoom:g}" if following else "Full-map camera"
         title.set_text(f"{cfg['scenario']} · {cfg['controller']} · {n} UAVs · t = {times[index]:.3f} s\n"
                        f"{camera_label} · enlarged aircraft glyphs · vertical display scale ×{scale:.1f}")
