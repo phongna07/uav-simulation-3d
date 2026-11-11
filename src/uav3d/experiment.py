@@ -169,9 +169,8 @@ def run(args):
                 raise ValueError(f"Timing replay scenario differs in {key}")
         timings = [json.loads(line) for line in (source/"events.jsonl").read_text().splitlines()]
         # Recorded delays were scaled by the source run's ratio; recover the raw duration.
+        # A ratio-0 source injected no delay, so its measured solve time is used instead.
         source_ratio = float(replay_config.get("compute_ratio",1.))
-        if source_ratio <= 0:
-            raise ValueError("Timing replay needs a source run with --compute-ratio > 0")
     ratio = args.compute_ratio
     robots = upstream.initialize(cfg,starts,target_samples[0])
     # Disposable warmup consumes RNG samples; measured experiments get a fresh stream.
@@ -183,7 +182,7 @@ def run(args):
                          horizon_s=horizon,full_target_duration_s=full_duration,
                          physics_dt=args.physics_dt,planning_period=cfg.TIMESTEP,
                          scheduling=args.scheduling,command_execution=execution,
-                         compute_ratio=ratio,
+                         compute_ratio=ratio,requested_drones=args.drones,
                          plan_tracking=dict(kp=upstream.TRACK_KP,kd=upstream.TRACK_KD,
                                             stop_accel_ratio=upstream.STOP_ACCEL_RATIO,
                                             track_accel_ratio=upstream.TRACK_ACCEL_RATIO,
@@ -250,7 +249,9 @@ def run(args):
                     recorded = timings[index]
                     if recorded["round"] != round_index or recorded["drone"] != i:
                         raise ValueError("Timing replay planning sequence does not match")
-                    delay = scaled_delay(float(recorded["injected_delay_s"])/source_ratio,ratio)
+                    raw = (float(recorded["injected_delay_s"])/source_ratio if source_ratio > 0
+                           else float(recorded["execution_s"]))
+                    delay = scaled_delay(raw,ratio)
                 else:
                     delay = scaled_delay(measured,ratio)
                 if not np.isfinite(delay) or delay < 0:
@@ -260,7 +261,9 @@ def run(args):
             def deliver(event, robot):
                 record = asdict(event)|dict(queue_wait_s=event.queue_wait_s,latency_s=event.latency_s,
                                            requested_command=robot.requested_command.tolist(),delivered=False,
-                                           upstream_stop=bool(robot.stop_current))
+                                           upstream_stop=bool(robot.stop_current),
+                                           used_backup=bool(getattr(robot,"used_backup",False)),
+                                           solver_failures=upstream.failure_count(robot,cfg.CONTROLLER))
                 if sim.hit is None and event.completed_at <= horizon+1e-12:
                     backend.commands[event.drone] = robot.requested_command
                     current = sim.schedules[event.drone]

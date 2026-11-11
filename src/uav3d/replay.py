@@ -128,6 +128,35 @@ class DepthSplitLine:
             artist.set_data_3d(p[:, 0], p[:, 1], p[:, 2])
 
 
+FIGURE_SPACE = "\u2007"  # as wide as a digit in proportional fonts such as DejaVu Sans
+
+
+def fixed_width(value, width, decimals):
+    """Right-align a number with digit-wide padding so centered text keeps its width."""
+    return f"{value:{width}.{decimals}f}".replace(" ", FIGURE_SPACE)
+
+
+def round_solve_times(events, ratio):
+    """(release times, d) per planning round, with d = max_i C_i in host seconds.
+
+    The raw host duration is recovered from the injected delay (delay = C*r), so
+    d does not depend on --compute-ratio; with r = 0 the measured duration is used."""
+    rounds = {}
+    for event in events:
+        raw = event["injected_delay_s"]/ratio if ratio > 0 else event["execution_s"]
+        release, d = rounds.get(event["round"], (event["observed_at"], 0.))
+        rounds[event["round"]] = (min(release, event["observed_at"]), max(d, raw))
+    ordered = sorted(rounds.values())
+    return np.array([r for r, _ in ordered]), np.array([d for _, d in ordered])
+
+
+def solve_time_label(releases, solves, t):
+    """Max solve time of the latest round released at or before mission time t."""
+    index = np.searchsorted(releases, t+1e-12, side="right")-1
+    value = fixed_width(solves[index]*1e3, 6, 1) if index >= 0 else FIGURE_SPACE*3+"n/a"
+    return f"Max solve time d = {value} ms"
+
+
 def render(args):
     import matplotlib
     matplotlib.use("Agg")
@@ -141,6 +170,10 @@ def render(args):
     cfg = json.loads((directory/"config.json").read_text())
     with np.load(directory/"trajectory.npz") as archive:
         times,states,targets = (archive[k].copy() for k in ("time","aircraft","target"))
+    events_path = directory/"events.jsonl"
+    events = ([json.loads(line) for line in events_path.read_text().splitlines() if line.strip()]
+              if events_path.exists() else [])
+    releases, solves = round_solve_times(events, float(cfg.get("compute_ratio", 1.)))
     output = Path(args.out or directory/"replay.png")
     if output.suffix.lower() not in (".png",".mp4"):
         raise ValueError("Replay output must end in .png or .mp4")
@@ -155,7 +188,6 @@ def render(args):
     ax.set(xlim=(xmin,xmax),ylim=(ymin,ymax),zlim=(0,max_z),
            xlabel="East [m]",ylabel="North [m]",zlabel="Altitude [m]")
     display_z = max(max_z,.22*max(xmax-xmin,ymax-ymin))
-    z_scale = display_z/max_z
     ax.set_box_aspect((xmax-xmin,ymax-ymin,display_z))
     ax.set_zticks(np.linspace(0,max_z,3))
     ax.view_init(elev=35,azim=-65)
@@ -196,9 +228,7 @@ def render(args):
         s = states[index]
         # Set the camera first: occlusion is tested against this frame's view.
         if following:
-            scale, _ = follow_camera(ax, targets[index], (xmin,ymin,xmax,ymax), max_z, zoom)
-        else:
-            scale = z_scale
+            follow_camera(ax, targets[index], (xmin,ymin,xmax,ymax), max_z, zoom)
         projection = ax.get_proj()
         stride = max(1,index//1000)
         hidden = occluded(projection, s[:,:3], boxes)
@@ -212,9 +242,9 @@ def render(args):
         target_line.update(np.r_[targets[:index:stride], targets[None,index]],
                            projection, boxes)
         target_marker.update(targets[index,None,:], projection, boxes)
-        camera_label = f"Target-follow camera · zoom ×{zoom:g}" if following else "Full-map camera"
-        title.set_text(f"{cfg['scenario']} · {cfg['controller']} · {n} UAVs · t = {times[index]:.3f} s\n"
-                       f"{camera_label} · enlarged aircraft glyphs · vertical display scale ×{scale:.1f}")
+        title.set_text(f"{cfg['scenario']} · {cfg['controller']} · {n} UAVs · "
+                       f"t = {fixed_width(times[index], 7, 3)} s\n"
+                       f"{solve_time_label(releases, solves, times[index])}")
         return []
     if output.suffix.lower()==".png":
         update(times[-1] if args.time is None else args.time)

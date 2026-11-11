@@ -19,25 +19,36 @@ def braking_summary(time, braking):
                 watchdog_braking_episodes=int(sum(episodes)))
 
 
-def calculate(time, aircraft, target, status, horizon, fov_half, events=(), result=None):
+def target_views(aircraft, target, fov_half):
+    """Per-interval target visibility and coverage efficiency (upstream definitions).
+
+    Entry k describes the interval [time[k], time[k+1]); the last sample has none."""
     sys.path.insert(0,str(UPSTREAM)) if str(UPSTREAM) not in sys.path else None
     from metrics import fov_coverage
-    time = np.asarray(time,float)
-    pos = np.asarray(aircraft)[:,:,:2]
-    status = np.asarray(status)
+    pos = np.asarray(aircraft)[:-1,:,:2]
+    target = np.asarray(target)[:-1]
     n = pos.shape[1]
-    weights = np.diff(time)
-    visible = np.any(np.max(np.abs(pos[:-1]-target[:-1,None,:2]),axis=2) <= fov_half,axis=1)
+    visible = np.any(np.max(np.abs(pos-target[:,None,:2]),axis=2) <= fov_half,axis=1)
     coverage = []
-    for p,t in zip(pos[:-1],target[:-1]):
+    for p,t in zip(pos,target):
         # Upstream run_metrics defines the metric leader as the nearest UAV,
         # independent of the sticky controller leader. Preserve that definition.
         leader = int(np.argmin(np.linalg.norm(p-t[:2],axis=1)))
         area,_ = fov_coverage(p,2*fov_half,leader_idx=leader)
         coverage.append(area/(n*(2*fov_half)**2))
+    return visible,np.array(coverage,float)
+
+
+def calculate(time, aircraft, target, status, horizon, fov_half, events=(), result=None, views=None):
+    time = np.asarray(time,float)
+    status = np.asarray(status)
+    n = np.asarray(aircraft).shape[1]
+    weights = np.diff(time)
+    visible,coverage = views if views is not None else target_views(aircraft,target,fov_half)
     # Terminal contact sample does not count as joining the formation.
     alive = len(time)-1 if result and result.get("collision") else len(time)
     joins,search_time,window,episodes = [],0.,0.,[]
+    follower_times = []
     for i in range(n):
         track = status[:,i,0].astype(bool)
         found = np.flatnonzero(track[:alive])
@@ -45,6 +56,11 @@ def calculate(time, aircraft, target, status, horizon, fov_half, events=(), resu
             continue
         k = int(found[0])
         joins.append(float(time[k]))
+        # Upstream's leader is in TRACK from its election (t = 0 there). Here the
+        # first status arrives with the first delivered command, so the leader is
+        # recognised by its recorded role instead of by t = 0.
+        if not (status[k,i,1] or time[k] <= 0):
+            follower_times.append(float(time[k]))
         window += time[-1]-time[k]
         episode = None
         for j in range(k,len(time)-1):
@@ -62,13 +78,13 @@ def calculate(time, aircraft, target, status, horizon, fov_half, events=(), resu
         return {f"{key}_{name}":float(fn(vals)) if vals else None
                 for name,fn in (("mean",np.mean),("p95",lambda x:np.percentile(x,95)),("max",np.max))}
     all_joined = len(joins)==n
-    follower_times = [t for t in joins if t>0]
     m = dict(gathered_uavs=len(joins),drone_count=n,
              gather_time_team_s=max(joins) if all_joined else None,
              gather_time_mean_s=float(np.mean(follower_times)) if all_joined and follower_times else 0. if all_joined else None,
              reform_search_pct=100*search_time/window if window and len(joins) and window/len(joins)>=.2*horizon else None,
              reform_episode_s=float(np.mean(episodes)) if episodes else None,
              reform_episodes_per_joined_uav=len(episodes)/len(joins) if joins else None,
+             reform_window_mean_s=window/len(joins) if joins else None,
              mission_visibility=100*float(weights@visible)/horizon,
              mission_cov_eff=float(weights@np.array(coverage))/horizon,
              target_loss_pct=100-100*float(weights@visible)/horizon,

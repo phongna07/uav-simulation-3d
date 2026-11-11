@@ -26,13 +26,21 @@ def parser():
         q.add_argument("--scheduling",choices=SCHEDULES,default="parallel",
                        help="parallel (default): one worker per UAV, all commands delivered after "
                             "the slowest solve; sequential: one shared worker, delays accumulate")
-        q.add_argument("--compute-ratio",type=float,default=1.,
+        q.add_argument("--compute-ratio",type=float,default=0.,
                        help="scale every measured planning duration by r before injecting it as "
-                            "mission-time delay (e.g. 0.5: onboard computer twice as fast); default 1")
+                            "mission-time delay (e.g. 0.5: onboard computer twice as fast, 1: host "
+                            "speed); default 0: instantaneous planning, physics paused while solving")
         if name=="benchmark":
             q.add_argument("--controllers",nargs="+",choices=CONTROLLERS,default=list(CONTROLLERS))
     q = sub.add_parser("metrics",help="recompute timestamp-based metrics from recorded data")
     q.add_argument("directory")
+    q = sub.add_parser("collect",help="add recorded runs to the per-preset tables in metrics/")
+    q.add_argument("runs",nargs="*",help="run directories, or names under runs/ (a benchmark "
+                   "directory adds each method); default: choose interactively")
+    q.add_argument("--latest",action="store_true",help="collect the most recently finished run")
+    q.add_argument("--out-dir",default="metrics",help="table directory (default: metrics)")
+    q.add_argument("--force",action="store_true",
+                   help="replace an algorithm's row even if the stored run finished later")
     q = sub.add_parser("replay",help="offline 3D PNG/MP4 rendering; never runs planners")
     q.add_argument("directory")
     q.add_argument("--out",help=".png or .mp4 output path; default: run/replay.png")
@@ -108,6 +116,9 @@ def main(argv=None):
         from .metrics import report
         print(json.dumps(report(args.directory),indent=2))
         return 0
+    if args.command=="collect":
+        from .collect import main as collect
+        return collect(args)
     if args.command=="replay":
         import math
         if args.fps<=0 or args.speed<=0:

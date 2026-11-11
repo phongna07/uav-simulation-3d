@@ -51,6 +51,12 @@ uv run uav3d replay runs/ours-demo --out exports/overview.mp4 --camera overview
 
 # Reuse a run's measured command delays; keep all experiment options identical.
 uv run uav3d run --duration 10 --timings-from runs/ours-demo --out runs/ours-repeated
+
+# Add recorded runs to the per-preset comparison tables in metrics/ (no simulation).
+uv run uav3d collect ours-demo            # a run under runs/ (or a path)
+uv run uav3d collect comparison           # every method of a benchmark directory
+uv run uav3d collect --latest             # the most recently finished run
+uv run uav3d collect                      # pick from a numbered list of runs
 ```
 
 Select `--controller ours|apf|pure_mpc|cbf_qp_lag|impc_ob_rec`, `--scenario scen1`,
@@ -81,17 +87,22 @@ Host solves still run one after another, each measured single-threaded, so
 `d` models dedicated hardware rather than host parallelism. Events record each
 drone's own `C_i` as `execution_s`/`injected_delay_s`; `latency_s` is `d`.
 
-`--compute-ratio r` (default `1`) models faster (or slower) planning hardware,
+`--compute-ratio r` (default `0`) models faster (or slower) planning hardware,
 e.g. a powerful onboard computer: every measured duration is multiplied by `r`
 before it is injected as mission-time delay, so with parallel scheduling the
 commands arrive at `release_time + r*max(C_i)`. `r=0.5` halves the delay;
 `r=0` delivers every command at its release (instantaneous planning: physics is
-frozen while the host solves, so no planning period is ever skipped). It is
+frozen while the host solves, so no planning period is ever skipped); `r=1`
+injects the measured host duration unchanged. It is
 a compatibility layer on timing only; the planner calls are unchanged. Events
 keep the raw host duration in `execution_s` and the scaled delay in
 `injected_delay_s`; `config.json` records `compute_ratio`. `--timings-from`
 divides the source run's delays by its recorded ratio and applies the new one,
-so the same measured timings can be replayed at different ratios.
+so the same measured timings can be replayed at different ratios; a ratio-0
+source injected no delay, so its measured `execution_s` is replayed instead.
+Events also record `used_backup` (upstream's contingency branch issued the
+command) and `solver_failures`, upstream's own cumulative failed/infeasible
+solve counter for that UAV (read only; absent for APF).
 
 Safety-layer activity is logged for `ours`: `trajectory.npz` has a per-sample,
 per-drone `watchdog_braking` flag (the drone is past its plan's stop point and
@@ -226,8 +237,10 @@ Mission metrics integrate sampled values with actual timestamp intervals.
 Coverage uses upstream's exact footprint-union calculation and its metric
 leader (nearest drone to target), which is distinct from the controller's
 sticky leader. Gathering/re-formation use published controller modes. The
-mean gathering convention follows upstream's positive join times; it excludes
-zero-time joins, not a separately inferred leader identity.
+mean gathering time is over the followers: upstream's leader is in TRACK from
+its election at t = 0, while here the first status arrives with the first
+delivered command, so a UAV whose first TRACK sample carries the leader role
+(or t = 0) is excluded.
 
 Visibility and coverage divide by the requested mission horizon, contributing
 zero after first collision. `--duration` explicitly defines a shorter test
@@ -242,7 +255,7 @@ Errors and interrupted runs are labeled, not presented as successful missions.
 Replay reads these artifacts without importing planners. Quadcopter glyphs with
 colored bodies, four rotor rings, and white nose stripes follow recorded attitude
 and are enlarged for field-scale visibility; the vertical display aspect is also
-exaggerated when needed, with its scale factor labeled. Aircraft
+exaggerated when needed. Aircraft
 positions, target, footprints, and obstacles use their recorded coordinates.
 The default camera follows the recorded target at 3× magnification with a
 55-degree downward view and fixed heading. The target stays centered even near
@@ -252,7 +265,12 @@ and `--camera overview` restores the full-map view. Camera tracking does not
 change the trajectory or simulation.
 The scenery viewport fills the entire output frame without stretching the map;
 the title sits on an opaque white overlay at the top and the UAV legend sits
-below it. World axes and their labels are hidden for a clean video frame.
+below it. The title's second line shows the max solve time
+`d = max_i C_i` of the latest planning round released at or before the frame
+time, read from `events.jsonl`. `C_i` is the raw host duration (the injected
+delay divided by `--compute-ratio`, or the measured duration when the ratio is
+0), so `d` does not depend on the ratio. Mission time and `d` use fixed-width,
+digit-wide padding so the centered title does not shift between frames. World axes and their labels are hidden for a clean video frame.
 MP4 export uses an environment-managed FFmpeg binary. Replay uses dark gray
 running-bond brick paving and buildings on rectangular obstacle footprints
 with framed glass, entrances, parapets, and rooftop solar panels,
@@ -270,6 +288,34 @@ frame, any part whose view ray toward the camera crosses an obstacle's bounding
 volume is drawn beneath the scenery layer (so solid facades and crowns cover
 it, while gaps between leaves still show it); unblocked parts draw above the
 scenery. Aircraft glyphs switch layer as a whole, based on their centre.
+
+## Comparison tables
+
+`uav3d collect` reads finished runs (`config.json`, `result.json`,
+`events.jsonl`, `trajectory.npz`) and never runs a planner. It writes
+`metrics/<preset>.xlsx`, `.csv` and `.md` (git-ignored), where `<preset>` is
+the scenario, `_<N>uav` when `--drones` was given, and `_<T>s` for a
+`--duration` shorter than the route or `_full_mission` otherwise (e.g.
+`scen1_150s`). Each file has one entry per algorithm: collecting a run
+replaces only its algorithm's row, so each file holds the latest run of every
+algorithm. A run that finished earlier than the stored one is skipped unless
+`--force` is given. The CSV is the store read back on the next collection.
+
+The paper metrics come first: the Markdown has a separate *Paper metrics*
+table, the XLSX a *Paper metrics* sheet (then *All metrics* and
+*Definitions*), and the CSV puts those columns first. They follow Section IV-C
+of the paper and upstream `thesis_metrics.py`: gathering time (mean
+follower `t_i^g`), re-formation time `rho_ref` (Eq. 33), mission visibility
+and target loss `T_loss` (Eq. 34), mission coverage `C` (Eq. 35) and the
+execution time per UAV and step (mean, p95). All are cut at the first
+collision `t_c`. A metric the run cannot define (e.g. a short mission in which
+not every UAV joins the formation, or a re-formation window shorter than 20 %
+of the mission) is left empty (`–` in Markdown), and the *Paper metric notes*
+entry says why. The other tables add run settings, safety (clearances,
+collision), formation, tracking distances, computation (fleet round time,
+latency, late delivery) and fallback/safety-layer counts; the Markdown and the
+XLSX *Definitions* sheet define every entry. Compare rows only when their
+compute ratio and scheduling match; `collect` warns when a file mixes them.
 
 ## Validation
 

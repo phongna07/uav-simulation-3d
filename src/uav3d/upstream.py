@@ -124,6 +124,23 @@ def plan_schedule(robot, cfg, release, previous_backup):
     return schedule,stop
 
 
+# Upstream's own cumulative solver-failure counter per controller (read only).
+FAILURE_COUNTERS = {"ours":("mpc","n_fail"),"pure_mpc":("simple","n_fail"),
+                    "cbf_qp_lag":("cbfqp","n_infeasible"),"impc_ob_rec":("impc.prob","n_fail")}
+
+
+def failure_count(robot, controller):
+    """Upstream's cumulative failed/infeasible solves of this robot, or None (e.g. APF)."""
+    if controller not in FAILURE_COUNTERS:
+        return None
+    path,name = FAILURE_COUNTERS[controller]
+    owner = robot
+    for part in path.split("."):
+        owner = getattr(owner,part,None)
+    value = getattr(owner,name,None)
+    return None if value is None else int(value)
+
+
 def publish_prediction(robot, schedule, release):
     """Replace upstream's prediction by the trajectory this aircraft really follows."""
     rows = schedule.prediction(release,len(robot.states_prediction))

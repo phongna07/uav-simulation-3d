@@ -8,3 +8,4 @@ dist/
 runs/
 exports/
 .ruff_cache/
+metrics/

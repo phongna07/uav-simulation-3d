@@ -164,4 +164,4 @@ def test_cli_forwards_compute_ratio():
     args = parser().parse_args(["run","--compute-ratio","0.5"])
     command = worker_command(args,"ours","runs/x")
     assert command[command.index("--compute-ratio")+1] == "0.5"
-    assert parser().parse_args(["run"]).compute_ratio == 1.
+    assert parser().parse_args(["run"]).compute_ratio == 0.
