@@ -11,7 +11,7 @@ import subprocess
 import time
 import numpy as np
 from .physics import RotorPyBackend
-from .scheduler import PlanningEvent, next_release, parallel_events, plan_against_snapshot
+from .scheduler import PlanningEvent, next_release, parallel_events, plan_against_snapshot, scaled_delay
 from . import upstream
 
 
@@ -49,6 +49,7 @@ class Simulation:
         self.schedules = [None]*n
         self.status = np.zeros((n,3),int)
         self.times, self.aircraft, self.targets, self.commands, self.statuses = [],[],[],[],[]
+        self.braking = []
         self.sample()
 
     def target(self, t):
@@ -59,9 +60,11 @@ class Simulation:
         return self.target_samples[k]*(1-f)+self.target_samples[j]*f
 
     def sample(self):
+        # Watchdog flag: the drone is past its plan's stop point, i.e. braking to rest.
+        braking = np.array([s is not None and self.t > s.stop_at+1e-9 for s in self.schedules])
         values = (self.t,self.backend.packed().copy(),self.target(self.t),
-                  self.backend.commands.copy(),self.status.copy())
-        seqs = (self.times,self.aircraft,self.targets,self.commands,self.statuses)
+                  self.backend.commands.copy(),self.status.copy(),braking)
+        seqs = (self.times,self.aircraft,self.targets,self.commands,self.statuses,self.braking)
         if self.times and abs(self.times[-1]-self.t) < 1e-12:
             for seq,v in zip(seqs,values):
                 seq[-1] = v
@@ -165,6 +168,11 @@ def run(args):
             if jsonable(cfg.SCENARIO_DEF[key]) != replay_config["scenario_definition"][key]:
                 raise ValueError(f"Timing replay scenario differs in {key}")
         timings = [json.loads(line) for line in (source/"events.jsonl").read_text().splitlines()]
+        # Recorded delays were scaled by the source run's ratio; recover the raw duration.
+        source_ratio = float(replay_config.get("compute_ratio",1.))
+        if source_ratio <= 0:
+            raise ValueError("Timing replay needs a source run with --compute-ratio > 0")
+    ratio = args.compute_ratio
     robots = upstream.initialize(cfg,starts,target_samples[0])
     # Disposable warmup consumes RNG samples; measured experiments get a fresh stream.
     np.random.seed(args.seed)
@@ -175,6 +183,7 @@ def run(args):
                          horizon_s=horizon,full_target_duration_s=full_duration,
                          physics_dt=args.physics_dt,planning_period=cfg.TIMESTEP,
                          scheduling=args.scheduling,command_execution=execution,
+                         compute_ratio=ratio,
                          plan_tracking=dict(kp=upstream.TRACK_KP,kd=upstream.TRACK_KD,
                                             stop_accel_ratio=upstream.STOP_ACCEL_RATIO,
                                             track_accel_ratio=upstream.TRACK_ACCEL_RATIO,
@@ -241,16 +250,17 @@ def run(args):
                     recorded = timings[index]
                     if recorded["round"] != round_index or recorded["drone"] != i:
                         raise ValueError("Timing replay planning sequence does not match")
-                    delay = float(recorded["injected_delay_s"])
+                    delay = scaled_delay(float(recorded["injected_delay_s"])/source_ratio,ratio)
                 else:
-                    delay = measured
+                    delay = scaled_delay(measured,ratio)
                 if not np.isfinite(delay) or delay < 0:
                     raise ValueError("Invalid recorded computation duration")
                 return measured,delay
 
             def deliver(event, robot):
                 record = asdict(event)|dict(queue_wait_s=event.queue_wait_s,latency_s=event.latency_s,
-                                           requested_command=robot.requested_command.tolist(),delivered=False)
+                                           requested_command=robot.requested_command.tolist(),delivered=False,
+                                           upstream_stop=bool(robot.stop_current))
                 if sim.hit is None and event.completed_at <= horizon+1e-12:
                     backend.commands[event.drone] = robot.requested_command
                     current = sim.schedules[event.drone]
@@ -319,7 +329,8 @@ def run(args):
         wall = time.perf_counter()-wall_start
         np.savez_compressed(out/"trajectory.npz",time=np.array(sim.times),
                             aircraft=np.array(sim.aircraft),target=np.array(sim.targets),
-                            command=np.array(sim.commands),status=np.array(sim.statuses))
+                            command=np.array(sim.commands),status=np.array(sim.statuses),
+                            watchdog_braking=np.array(sim.braking))
         np.savez_compressed(out/"plans.npz",prediction=np.array(plans),
                             epochs=np.array(plan_epochs),drone=np.array(plan_drones))
         (out/"events.jsonl").touch(exist_ok=True)

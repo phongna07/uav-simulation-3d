@@ -36,3 +36,13 @@ def test_zero_duration_first_collision():
     assert m["gathered_uavs"]==0
     assert m["mission_visibility"]==0
     assert m["mission_cov_eff"]==0
+
+
+def test_watchdog_braking_summary():
+    import numpy as np
+    from uav3d.metrics import braking_summary
+    t = np.array([0.,1.,2.,3.,4.])
+    b = np.array([[0,0],[1,0],[1,0],[0,1],[1,1]],bool)
+    m = braking_summary(t,b)
+    assert m["watchdog_braking_episodes"] == 3
+    assert m["watchdog_braking_pct_max"] == 50.

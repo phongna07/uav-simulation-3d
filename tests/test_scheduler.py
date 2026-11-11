@@ -141,3 +141,27 @@ def test_speed_guard_and_stale_plan_rejection():
     assert plan_valid(s,.5,[1.1,.1],[2,0],cfg)
     assert not plan_valid(s,.5,[1.5,0],[2,0],cfg)               # 0.5 m behind the plan
     assert not plan_valid(s,.5,[1,0],[-.5,0],cfg)               # stopped while it assumed 2 m/s
+
+
+def test_compute_ratio_scales_injected_delay():
+    from uav3d.scheduler import scaled_delay, parallel_events
+    assert scaled_delay(.2) == pytest.approx(.2)
+    assert scaled_delay(.2,.5) == pytest.approx(.1)
+    events = list(parallel_events([scaled_delay(d,.5) for d in (.04,.15)],release=.3))
+    assert events[0].completed_at == pytest.approx(.3+.075)
+    assert scaled_delay(.2,0.) == 0.
+    zero = list(parallel_events([scaled_delay(d,0.) for d in (.04,.15)],release=.3))
+    assert all(e.completed_at == pytest.approx(.3) for e in zero)
+    from uav3d.scheduler import next_release
+    assert next_release(.3,.3,.1) == (pytest.approx(.4),0)
+    for bad in (-1.,float("nan"),float("inf")):
+        with pytest.raises(ValueError):
+            scaled_delay(.1,bad)
+
+
+def test_cli_forwards_compute_ratio():
+    from uav3d.cli import parser, worker_command
+    args = parser().parse_args(["run","--compute-ratio","0.5"])
+    command = worker_command(args,"ours","runs/x")
+    assert command[command.index("--compute-ratio")+1] == "0.5"
+    assert parser().parse_args(["run"]).compute_ratio == 1.

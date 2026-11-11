@@ -26,6 +26,9 @@ def parser():
         q.add_argument("--scheduling",choices=SCHEDULES,default="parallel",
                        help="parallel (default): one worker per UAV, all commands delivered after "
                             "the slowest solve; sequential: one shared worker, delays accumulate")
+        q.add_argument("--compute-ratio",type=float,default=1.,
+                       help="scale every measured planning duration by r before injecting it as "
+                            "mission-time delay (e.g. 0.5: onboard computer twice as fast); default 1")
         if name=="benchmark":
             q.add_argument("--controllers",nargs="+",choices=CONTROLLERS,default=list(CONTROLLERS))
     q = sub.add_parser("metrics",help="recompute timestamp-based metrics from recorded data")
@@ -46,7 +49,8 @@ def parser():
 def worker_command(args, controller, output):
     command = [sys.executable,"-m","uav3d.cli","_worker","--scenario",args.scenario,
                "--controller",controller,"--seed",str(args.seed),"--physics-dt",str(args.physics_dt),
-               "--scheduling",args.scheduling,"--out",str(output)]
+               "--scheduling",args.scheduling,
+               "--compute-ratio",repr(args.compute_ratio),"--out",str(output)]
     for name in ("drones","duration","timings_from"):
         value = getattr(args,name)
         if value is not None:
@@ -63,6 +67,8 @@ def main(argv=None):
             p.error("--physics-dt must be finite and positive")
         if args.duration is not None and (not math.isfinite(args.duration) or args.duration<=0):
             p.error("--duration must be finite and positive")
+        if not math.isfinite(args.compute_ratio) or args.compute_ratio<0:
+            p.error("--compute-ratio must be finite and nonnegative")
     if args.command=="_worker":
         from threadpoolctl import threadpool_limits
         from .experiment import run

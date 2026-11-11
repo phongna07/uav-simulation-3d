@@ -7,6 +7,18 @@ import numpy as np
 from .upstream import UPSTREAM
 
 
+def braking_summary(time, braking):
+    """Watchdog braking: per-drone time share and episode count (adapter safety layer)."""
+    time,braking = np.asarray(time,float),np.asarray(braking,bool)
+    weights = np.diff(time)
+    span = time[-1]-time[0]
+    shares = [float(weights@braking[:-1,i])/span*100 if span > 0 else 0. for i in range(braking.shape[1])]
+    episodes = [int(np.sum(braking[1:,i] & ~braking[:-1,i])+braking[0,i]) for i in range(braking.shape[1])]
+    return dict(watchdog_braking_pct_max=max(shares,default=0.),
+                watchdog_braking_pct_mean=float(np.mean(shares)) if shares else 0.,
+                watchdog_braking_episodes=int(sum(episodes)))
+
+
 def calculate(time, aircraft, target, status, horizon, fov_half, events=(), result=None):
     sys.path.insert(0,str(UPSTREAM)) if str(UPSTREAM) not in sys.path else None
     from metrics import fov_coverage
@@ -63,7 +75,9 @@ def calculate(time, aircraft, target, status, horizon, fov_half, events=(), resu
              completion_pct=100*time[-1]/horizon,
              success=bool(result and result.get("status")=="completed"),
              mission_time_s=float(time[-1]),horizon_s=horizon,
-             computation_calls=len(events))
+             computation_calls=len(events),
+             rejected_stale_plans=sum(e.get("accepted") is False for e in events),
+             upstream_stop_fallbacks=sum(bool(e.get("upstream_stop")) and e.get("delivered",True) for e in events))
     for key in ("execution_s","queue_wait_s","latency_s"):
         m.update(stats(key))
     if result:
@@ -81,6 +95,9 @@ def report(directory):
         events = [json.loads(l) for l in (directory/"events.jsonl").read_text().splitlines()]
         m = calculate(data["time"],data["aircraft"],data["target"],data["status"],
                       cfg["horizon_s"],cfg["params"]["VIEWING_RADIUS"],events,result)
+        if "watchdog_braking" in data:
+            m.update(braking_summary(data["time"],data["watchdog_braking"]))
+    m.update(compute_ratio=cfg.get("compute_ratio",1.))
     m.update(controller=cfg["controller"],scenario=cfg["scenario"],seed=cfg["seed"])
     from .experiment import write_json
     write_json(directory/"metrics.json",m)

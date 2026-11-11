@@ -32,6 +32,18 @@ def next_release(completed, released, period):
 SCHEDULES = ("parallel", "sequential")
 
 
+def scaled_delay(duration, ratio=1.):
+    """Mission-time delay for a host-measured solve on hardware `1/ratio` times as fast.
+
+    ratio=1 (default) injects the measured host duration unchanged; ratio=0 delivers
+    every command at its release (instantaneous planning, physics frozen while solving)."""
+    if not math.isfinite(ratio) or ratio < 0:
+        raise ValueError("Compute ratio must be finite and nonnegative")
+    if not math.isfinite(duration) or duration < 0:
+        raise ValueError("Planning duration must be finite and nonnegative")
+    return duration*ratio
+
+
 def parallel_events(durations, release=0., round_index=0):
     """One worker per UAV: all start at release, all deliver at release+max(C_i)."""
     durations = list(durations)

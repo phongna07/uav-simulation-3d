@@ -81,6 +81,26 @@ Host solves still run one after another, each measured single-threaded, so
 `d` models dedicated hardware rather than host parallelism. Events record each
 drone's own `C_i` as `execution_s`/`injected_delay_s`; `latency_s` is `d`.
 
+`--compute-ratio r` (default `1`) models faster (or slower) planning hardware,
+e.g. a powerful onboard computer: every measured duration is multiplied by `r`
+before it is injected as mission-time delay, so with parallel scheduling the
+commands arrive at `release_time + r*max(C_i)`. `r=0.5` halves the delay;
+`r=0` delivers every command at its release (instantaneous planning: physics is
+frozen while the host solves, so no planning period is ever skipped). It is
+a compatibility layer on timing only; the planner calls are unchanged. Events
+keep the raw host duration in `execution_s` and the scaled delay in
+`injected_delay_s`; `config.json` records `compute_ratio`. `--timings-from`
+divides the source run's delays by its recorded ratio and applies the new one,
+so the same measured timings can be replayed at different ratios.
+
+Safety-layer activity is logged for `ours`: `trajectory.npz` has a per-sample,
+per-drone `watchdog_braking` flag (the drone is past its plan's stop point and
+braking to rest), events record `upstream_stop` (upstream fell back to its
+backup, so the aircraft stops along its current plan) and `accepted: false`
+(stale plan rejected). `metrics.json` summarizes these as
+`watchdog_braking_pct_*`, `watchdog_braking_episodes`, `upstream_stop_fallbacks`
+and `rejected_stale_plans`.
+
 `--scheduling sequential` represents **one shared ground-computer worker** for
 every algorithm, with UAVs processed in ascending ID. At each admitted nominal
 planning release, every planner observes the same team/target snapshot. If its
