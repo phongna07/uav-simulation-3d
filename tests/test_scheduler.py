@@ -66,31 +66,78 @@ def test_parallel_planners_see_only_pre_round_predictions():
     assert [r.states_prediction[0,0] for r in robots]==[10,11,12]
 
 
-def test_plan_schedule_indexes_by_mission_time_then_brakes():
+
+def line_plan(start, speed, steps, period=.1):
+    """A constant-velocity plan along +x from the origin."""
+    t=np.arange(steps+1)*period
+    states=np.column_stack([speed*t,0*t,np.full_like(t,speed),0*t])
+    return states,np.zeros((steps,2))
+
+
+def test_plan_schedule_feedforward_and_tracking():
     from uav3d.scheduler import PlanSchedule
-    s=PlanSchedule(.3,.1,np.array([[1.,0],[2,0],[3,0]]),2.5,5.)
-    assert s.command(.3,[0,0])==pytest.approx([1,0])
-    assert s.command(.4+1e-12,[0,0])==pytest.approx([2,0])  # boundary rounding
-    assert s.command(.55,[0,0])==pytest.approx([3,0])
-    assert s.command(.65,[1,0,0])==pytest.approx([-2.5,0])  # brake tail, u=-gain*v
-    assert s.command(.65,[10,0,0])==pytest.approx([-5,0])   # limited to umax
+    states,controls=line_plan(0,1.,20)
+    controls[3]=[2.,0]
+    s=PlanSchedule(.3,.1,states,controls,5.,9.,6.,4.)
+    p,v,u=s.reference(.65)                                  # step 3, halfway
+    assert p==pytest.approx([.35,0]) and v==pytest.approx([1,0]) and u==pytest.approx([2,0])
+    assert s.reference(.4+1e-12)[2]==pytest.approx([0,0])   # boundary rounding
+    assert s.command(.65,[.35,.1],[1,0])==pytest.approx([2,-.9])  # pulls back onto the path
+    assert np.linalg.norm(s.command(.65,[0,-5],[0,0]))==pytest.approx(5)  # limited to umax
+    wide=PlanSchedule(.3,.1,states,controls,5.,9.,6.,4.,track_umax=7.5)
+    u=wide.command(.65,[0,-5],[0,0])
+    assert np.linalg.norm(u)==pytest.approx(7.5)                # correction may exceed umax
+    braking=PlanSchedule(0.,.1,states,np.tile([-5.,0],(20,1)),5.,9.,6.,4.,track_umax=7.5)
+    assert braking.command(.05,[.05,3],[1,0])[0]==pytest.approx(-5,abs=1e-9)  # planned braking kept
     with pytest.raises(ValueError):
-        s.command(.2,[0,0])
+        s.command(.2,[0,0],[0,0])
 
 
-def test_late_plan_is_executed_from_its_current_step():
+def test_watchdog_stops_along_remaining_plan_path():
+    from uav3d.scheduler import PlanSchedule
+    states,controls=line_plan(0,8.,20)                       # 2 s plan, 16 m
+    s=PlanSchedule(0.,.1,states,controls,5.,9.,6.,4.)
+    # Latest step from which 8 m/s stops within the remaining plan at <= 4 m/s^2.
+    assert s.stop_at==pytest.approx(1.)
+    brake=2*(s.end-s.stop_at)
+    p,v,_=s.reference(s.stop_at+brake/2)
+    assert 0<v[0]<8 and p[0]<16
+    p,v,_=s.reference(s.stop_at+brake+1)
+    assert p==pytest.approx([16,0]) and v==pytest.approx([0,0])  # holds the plan's end
+    early=s.stopped(.25)
+    assert early.stop_at==pytest.approx(.25)
+    assert s.stopped(5.).stop_at==pytest.approx(1.)          # never later than its own watchdog
+    path=early.prediction(0.,40)
+    assert np.all(np.diff(path[:,0])>=-1e-9) and path[-1,0]==pytest.approx(16)
+    assert path[-1,2]==pytest.approx(0)
+
+
+def test_tracked_plan_resists_drift_and_stops():
     from uav3d.scheduler import PlanSchedule
     physics=RotorPyBackend([[0,0,3]])
     collision=CollisionWorld([],[],[-50,-50,50,50],.2)
-    sim=Simulation(physics,collision,np.array([[0,0,0],[1,0,0]]),1.,2.,.005)
-    sim.advance(.25)                    # plan released at 0, delivered 0.25 s late
-    sim.schedules[0]=PlanSchedule(0.,.1,np.array([[5.,0],[5,0],[0,0],[-5,0]]),2.5,5.)
-    sim.apply_schedules(sim.t)
-    assert physics.commands[0,:2]==pytest.approx([0,0])  # step 2, not U[0]
-    sim.advance(.35)
-    assert physics.commands[0,:2]==pytest.approx([-5,0])
-    sim=Simulation(physics,collision,np.array([[0,0,0],[1,0,0]]),1.,4.,.005)
-    sim.t=.35
-    sim.schedules[0]=PlanSchedule(0.,.1,np.zeros((4,2)),2.5,5.)
-    sim.advance(4.)                     # plan exhausted: brake tail settles to rest
+    sim=Simulation(physics,collision,np.array([[0,0,0],[1,0,0]]),1.,6.,.005)
+    states,controls=line_plan(0,0.,20)
+    sim.schedules[0]=PlanSchedule(0.,.1,states,controls,5.,9.,6.,4.)
+    physics.states[0]["v"][:2]=[1.,1.]                      # disturbance off the plan
+    sim.advance(3.)
+    assert np.linalg.norm(physics.positions()[0,:2])<.05     # pulled back to the held point
     assert np.linalg.norm(physics.velocities()[0,:2])<.05
+
+
+def test_speed_guard_and_stale_plan_rejection():
+    from types import SimpleNamespace
+    from uav3d.scheduler import PlanSchedule
+    from uav3d.upstream import plan_valid
+    states,controls=line_plan(0,2.,20)
+    controls[:]=[3.,1.]
+    s=PlanSchedule(0.,.1,states,controls,5.,9.,6.,4.,vmax=2.)
+    assert s.command(.05,[.1,0],[2,0])==pytest.approx([0,1])   # no further speed-up at vmax
+    banded=PlanSchedule(0.,.1,states,controls,5.,9.,6.,4.,vmax=2.,vmax_band=.5)
+    assert banded.command(.05,[.1,0],[1.6,0])[0]==pytest.approx(0)  # inside the band
+    assert banded.command(.05,[.1,0],[2.5,0])[0]==pytest.approx(-3)  # above: kd*(vmax-speed)
+    assert s.command(.05,[.1,0],[1,0])[0]>0
+    cfg=SimpleNamespace(ROBOT_RADIUS=.5)
+    assert plan_valid(s,.5,[1.1,.1],[2,0],cfg)
+    assert not plan_valid(s,.5,[1.5,0],[2,0],cfg)               # 0.5 m behind the plan
+    assert not plan_valid(s,.5,[1,0],[-.5,0],cfg)               # stopped while it assumed 2 m/s

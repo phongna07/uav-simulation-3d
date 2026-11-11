@@ -70,30 +70,66 @@ def make_robots(cfg, starts):
     return [AdapterRobot(i,np.r_[p,np.zeros(3)],p.copy()) for i,p in enumerate(starts)]
 
 
-def plan_schedule(robot, cfg, release, previous_backup):
-    """The time-indexed control sequence behind the command "ours" just issued.
+# Plan tracking for "ours" (adapter-side; upstream is unchanged). The PD loop
+# has natural frequency 3 rad/s and damping 1; with upstream's ACCEL_TAU = 0.2 s
+# response lag it stays stable (tau*kp < kd). A watchdog stop may use up to
+# 80% of UMAX, leaving the rest for the tracking correction.
+TRACK_KP, TRACK_KD, STOP_ACCEL_RATIO = 9.0, 6.0, 0.8
+# UMAX limits the planner; the Hummingbird (thrust/weight ~10) can do more. The
+# tracking correction may raise the horizontal command to 1.5*UMAX (~37 deg tilt
+# at UMAX = 5), so a plan that brakes at UMAX can still be followed.
+TRACK_ACCEL_RATIO = 1.5
+VMAX_GUARD_BAND = 0.5          # m/s below VMAX at which speed-up is cut
+# A delivered plan was solved from the state at its release. It is accepted only
+# while the aircraft is still near the plan's state for the delivery time (e.g.
+# not after a watchdog stop in the meantime); otherwise the current schedule
+# continues and the next release replans from the real state.
+ACCEPT_POSITION_RADIUS_RATIO, ACCEPT_SPEED_ERROR = 0.5, 2.0
 
-    Upstream applies controls_prediction[0] for one period and the rest of the
-    sequence on later periods; the CONTINGENCY fallback applies Ub, aligned with
-    the solve that produced it. Executing the whole sequence keeps the aircraft
-    on the trajectory the MPC verified, however late the next plan arrives.
+
+def plan_valid(schedule, t, position, velocity, cfg):
+    p,v,_ = schedule.reference(t)
+    return (np.linalg.norm(p-np.asarray(position)[:2]) <= ACCEPT_POSITION_RADIUS_RATIO*cfg.ROBOT_RADIUS
+            and np.linalg.norm(v-np.asarray(velocity)[:2]) <= ACCEPT_SPEED_ERROR)
+
+
+def plan_schedule(robot, cfg, release, previous_backup):
+    """The plan behind the command "ours" just issued, and whether it is a stop.
+
+    Returns (schedule, stop_current). A fresh plan, braking prediction, or
+    shifted (age_robot) previous plan starts at release, row 0. When upstream
+    used its CONTINGENCY backup (a failed solve), the aircraft has been flying
+    the current plan rather than the backup branch, so stop_current asks to
+    stop along the current plan; the backup branch is only a fallback when no
+    plan was ever delivered.
     """
     from .scheduler import PlanSchedule
     backup = getattr(robot,"_backup",None)
     if backup is not None and backup is not previous_backup:
         robot.backup_epoch = release      # a successful solve made a fresh backup branch
-    if getattr(robot,"used_backup",False):
-        start,controls = robot.backup_epoch,backup[1]
+    stop = getattr(robot,"used_backup",False)
+    if stop:
+        start,states,controls = robot.backup_epoch,backup[0][:,:4],backup[1]
     else:
-        # Fresh plan, braking prediction, or shifted (age_robot) previous plan: row 0 is now.
-        start,controls = release,robot.controls_prediction[:,:2]
-    tau = getattr(cfg,"ACCEL_TAU",0.)
-    schedule = PlanSchedule(start,cfg.TIMESTEP,np.array(controls,float,copy=True),
-                            1/(2*tau) if tau > 0 else 1/cfg.TIMESTEP,cfg.UMAX)
+        start = release
+        states = robot.states_prediction[:,[0,1,3,4]]
+        controls = robot.controls_prediction[:,:2]
+    schedule = PlanSchedule(start,cfg.TIMESTEP,np.array(states,float,copy=True),
+                            np.array(controls,float,copy=True),cfg.UMAX,
+                            TRACK_KP,TRACK_KD,STOP_ACCEL_RATIO*cfg.UMAX,cfg.VMAX,
+                            TRACK_ACCEL_RATIO*cfg.UMAX,VMAX_GUARD_BAND)
     k = schedule.index(release+cfg.TIMESTEP/2)
     if k < len(controls) and not np.allclose(controls[k],robot.requested_command[:2],atol=1e-9):
         raise RuntimeError("Plan schedule does not reproduce the issued command")
-    return schedule
+    return schedule,stop
+
+
+def publish_prediction(robot, schedule, release):
+    """Replace upstream's prediction by the trajectory this aircraft really follows."""
+    rows = schedule.prediction(release,len(robot.states_prediction))
+    z = robot.state[2]
+    robot.states_prediction = np.column_stack([rows[:,:2],np.full(len(rows),z),
+                                               rows[:,2:],np.zeros(len(rows))])
 
 
 def set_tracker_interval(tracker, dt):

@@ -72,10 +72,10 @@ class Simulation:
     def apply_schedules(self, t):
         if not any(s is not None for s in self.schedules):
             return
-        velocities = self.backend.velocities()
+        positions,velocities = self.backend.positions(),self.backend.velocities()
         for i,schedule in enumerate(self.schedules):
             if schedule is not None:
-                self.backend.commands[i,:2] = schedule.command(t,velocities[i])
+                self.backend.commands[i,:2] = schedule.command(t,positions[i],velocities[i])
 
     def advance(self, until):
         until = min(until,self.horizon)
@@ -144,7 +144,7 @@ def run(args):
     backend = RotorPyBackend(starts,args.physics_dt)
     # "ours" executes its whole plan by mission time; other methods hold the latest command.
     follow_plan = cfg.CONTROLLER == "ours"
-    execution = "time_indexed_plan" if follow_plan else "hold_latest"
+    execution = "tracked_plan_with_watchdog" if follow_plan else "hold_latest"
     replay_config = None
     timings = None
     if args.timings_from:
@@ -175,6 +175,13 @@ def run(args):
                          horizon_s=horizon,full_target_duration_s=full_duration,
                          physics_dt=args.physics_dt,planning_period=cfg.TIMESTEP,
                          scheduling=args.scheduling,command_execution=execution,
+                         plan_tracking=dict(kp=upstream.TRACK_KP,kd=upstream.TRACK_KD,
+                                            stop_accel_ratio=upstream.STOP_ACCEL_RATIO,
+                                            track_accel_ratio=upstream.TRACK_ACCEL_RATIO,
+                                            vmax_guard_band=upstream.VMAX_GUARD_BAND,
+                                            accept_position_radius_ratio=upstream.ACCEPT_POSITION_RADIUS_RATIO,
+                                            accept_speed_error=upstream.ACCEPT_SPEED_ERROR)
+                         if follow_plan else None,
                          deployment="one_worker_per_uav" if args.scheduling=="parallel"
                          else "shared_ground_cpu_sequential",order="ascending_drone_id",
                          physics="rotorpy_hummingbird_cmd_acc",aerodynamics=False,
@@ -225,7 +232,8 @@ def run(args):
                     raise RuntimeError("Upstream failed to issue an acceleration command")
                 robot.prediction_epoch = release
                 # Built outside the timed call; the shifted buffers change next round.
-                robot.schedule = upstream.plan_schedule(robot,cfg,release,backup) if follow_plan else None
+                robot.schedule,robot.stop_current = (upstream.plan_schedule(robot,cfg,release,backup)
+                                                     if follow_plan else (None,False))
                 if timings is not None:
                     index = len(events)+offset
                     if index >= len(timings):
@@ -245,8 +253,23 @@ def run(args):
                                            requested_command=robot.requested_command.tolist(),delivered=False)
                 if sim.hit is None and event.completed_at <= horizon+1e-12:
                     backend.commands[event.drone] = robot.requested_command
-                    sim.schedules[event.drone] = robot.schedule
-                    if robot.schedule is not None:
+                    current = sim.schedules[event.drone]
+                    if robot.stop_current and current is not None:
+                        # Upstream fell back to stopping. The aircraft flew the current
+                        # plan, not the backup branch, so it stops along that plan now,
+                        # and publishes that stop as its prediction.
+                        sim.schedules[event.drone] = current.stopped(sim.t)
+                        upstream.publish_prediction(robot,sim.schedules[event.drone],release)
+                    elif robot.schedule is not None and current is not None and not upstream.plan_valid(
+                            robot.schedule,sim.t,backend.positions()[event.drone],
+                            backend.velocities()[event.drone],cfg):
+                        # Stale: solved for a state the aircraft has left. Keep flying
+                        # (or stopping along) the current plan and publish that instead.
+                        record["accepted"] = False
+                        upstream.publish_prediction(robot,current,release)
+                    else:
+                        sim.schedules[event.drone] = robot.schedule
+                    if sim.schedules[event.drone] is not None:
                         # Delivered late: continue at the plan step for now, not U[0].
                         sim.apply_schedules(sim.t)
                     sim.status[event.drone] = (robot.mode == cfg.MODE_TRACK,robot.is_leader_role,

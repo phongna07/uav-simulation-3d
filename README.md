@@ -91,16 +91,37 @@ release_time + C_0 + C_1 + ... + C_i
 ```
 
 During these delays RotorPy and the target advance in simulation time;
-attitude and altitude control keep running. For `ours`, each delivered result
-is the whole planned control sequence, executed by mission time: `U[k]` applies
-on `[release + k*dt, release + (k+1)*dt)`, so a late plan starts at its current
-step rather than `U[0]`, and the previous plan keeps playing until it arrives.
-A CONTINGENCY fallback plays the backup branch `Ub` aligned with the solve that
-produced it. Once a sequence runs out, the aircraft brakes towards rest
-(`u = -v/(2*ACCEL_TAU)`, at most `UMAX`). Holding one command for several
-periods would accelerate the aircraft past `VMAX`, after which the MPC's hard
-speed bound is infeasible. Other methods still hold their latest horizontal
-command. `config.json` records this as `command_execution`. Results and predictions are published only on completion. Nominal
+attitude and altitude control keep running. Other methods hold their latest
+horizontal command. For `ours` (`command_execution: tracked_plan_with_watchdog`),
+each delivered result is the whole plan, followed by mission time at the
+physics rate:
+
+- **Time-indexed plan.** `U[k]` is the feedforward on
+  `[release + k*dt, release + (k+1)*dt)`; a late plan starts at its current
+  step, not `U[0]`. The previous plan keeps playing until a new one is accepted.
+- **Tracking.** `u = U[k] + 9*(p_plan - p) + 6*(v_plan - v)` (3 rad/s,
+  critically damped) removes the drift between upstream's lag model and
+  RotorPy. Only the correction may raise the command above `UMAX`, up to
+  `1.5*UMAX`; the Hummingbird's thrust/weight is about 10, so `UMAX` limits the
+  planner, not the aircraft.
+- **Watchdog.** Each plan stops being followed as-is at the last planned step
+  from which its remaining path suffices to stop at `0.8*UMAX`. The reference
+  then slows to rest along that remaining, corridor-verified path and holds its
+  end point. When upstream falls back to its CONTINGENCY backup (failed solve),
+  the aircraft has been flying the plan, not the backup branch, so it starts this
+  stop immediately and publishes it as its prediction.
+- **Stale-plan rejection.** A plan solved for an earlier state is accepted only
+  if, at delivery, the aircraft is within `0.5*ROBOT_RADIUS` and 2 m/s of the
+  plan's state for that time. Otherwise the current schedule continues, its
+  trajectory is published, and the next release replans from the real state.
+  Events record `accepted: false`.
+- **Speed guard.** Within 0.5 m/s of `VMAX` the speed-increasing part of the
+  command is removed; above it, it brakes by `6*(VMAX - speed)`. Holding one
+  command for several periods had driven aircraft far past `VMAX`, after which
+  the MPC's hard speed bound is infeasible.
+
+These gains and ratios are adapter constants in `upstream.py`, recorded in
+`config.json` under `plan_tracking`. Results and predictions are published only on completion. Nominal
 releases while the worker is busy are dropped, without creating a request
 backlog. Upstream shared leader/slot bookkeeping is retained in both modes;
 sequential mode also keeps upstream's access to already-completed same-round plans.
