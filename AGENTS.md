@@ -94,6 +94,36 @@ request. Confirm the MP4 file exists and is non-empty, then give the user its
 path (and send the file when the environment allows it). If no video was
 requested, a PNG replay is optional, not required.
 
+## Rule 5: long missions must never hit a background time limit
+
+A full `scen1` mission (749 s of mission time) takes roughly 50 minutes of wall
+time, and a mission killed part-way leaves an incomplete run directory with no
+`metrics.json`. The agent harness stops background commands after 30 minutes by
+default, so a long run must be started so that limit cannot apply:
+
+- Never start a full or long mission as a foreground command and let the harness
+  move it to the background on its own timeout; that path gets the 30-minute
+  default and the run is killed.
+- Launch it with `run_in_background: true` and the maximum `timeout`
+  (`7200000` ms) on the very first call. Chain `run`, `metrics`, and `replay`
+  in that one command so nothing needs a second launch.
+- If a mission may exceed two hours (for example `--scheduling sequential` or
+  `--drones 9` at full length), detach it from the harness instead, with output
+  redirected to a log file, then poll that log and `runs/<name>/` with short
+  commands:
+
+  ```bash
+  setsid nohup sh -c 'uv run uav3d run --out runs/<name> && uv run uav3d metrics runs/<name> && uv run uav3d replay runs/<name> --out exports/<name>.mp4 --speed 5 --fps 24' > /tmp/<name>.log 2>&1 &
+  ```
+
+- Do not pipe a long run into `tail`/`head`; it hides progress until exit. Write
+  to a log file and check mission progress with the last `completed_at` in
+  `runs/<name>/events.jsonl` against `full_target_duration_s` in `config.json`.
+- Never restart a run that is still going, and never reuse an output directory;
+  `--out` must be new, so a killed run needs a new name.
+- If a run is killed anyway, say so in the summary, state how far it got, and do
+  not report its partial directory as a completed mission.
+
 ## Workflow notes
 
 - Python 3.12, dependencies via `uv sync --locked`; do not loosen pins in
