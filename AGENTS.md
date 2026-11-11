@@ -123,6 +123,43 @@ default, so a long run must be started so that limit cannot apply:
 - If a run is killed anyway, say so in the summary, state how far it got, and do
   not report its partial directory as a completed mission.
 
+## Rule 6: assess cross-algorithm impact before changing any adapter layer
+
+The adapter serves several upstream controllers (`ours`, `apf`, `pure_mpc`,
+`cbf_qp_lag`, `impc_ob_rec`) through mostly shared code. A change made for one
+algorithm can silently change what another one does, which makes benchmark
+comparisons unfair or uninterpretable. Whenever you write or modify an adapter
+layer for a specific algorithm:
+
+1. **Find out what the code path is shared with.** Before editing, check
+   whether the code you are touching (`upstream.py`, `scheduler.py`,
+   `physics.py`, `experiment.py`, metrics, logging) runs for other controllers
+   too, or only inside a per-controller branch such as
+   `cfg.CONTROLLER == "<name>"`.
+2. **Assess the effect on every other algorithm.** For each other controller,
+   decide whether the change would alter its inputs, outputs, timing, command
+   delivery, safety-layer behavior, or recorded metrics. Read the other
+   controllers' paths; do not assume they are unaffected.
+3. **Decide the scope deliberately, per algorithm.** Do not default to either
+   "apply everywhere" or "apply only here":
+   - Apply it to all controllers when it is algorithm-neutral (plant, timing,
+     safety, logging) and every algorithm should be measured under the same
+     conditions.
+   - Restrict it to the one controller, behind an explicit per-controller
+     branch, when it only compensates for that algorithm's own interface or
+     would change another algorithm's effective behavior.
+   - If the right scope is unclear, or a fix for one algorithm would give it an
+     advantage or handicap relative to the others, stop and ask the user.
+4. **Keep comparisons fair.** A layer that exists for only some controllers
+   must be visible in the run artifacts (for example `config.json`) and in the
+   README, so benchmark results are read with that difference in mind.
+5. **Validate the other algorithms too.** If the change touches shared code,
+   Rule 3 applies to every affected controller, not just the one you were
+   working on: run a short mission with `--controller <name>` for each, or
+   `uav3d benchmark --duration 2 --out runs/check-<short-name>-bench`.
+6. **Report the decision.** In your summary, state which controllers the change
+   applies to, which it deliberately does not, and why.
+
 ## Workflow notes
 
 - Python 3.12, dependencies via `uv sync --locked`; do not loosen pins in
