@@ -44,8 +44,8 @@ def parser():
     q.add_argument("--speed",type=float,default=1.,help="mission seconds per video second")
     q.add_argument("--camera",choices=("follow","overview"),default="follow",
                    help="follow the target (default) or show the full map")
-    q.add_argument("--zoom",type=float,default=3.,
-                   help="follow camera magnification relative to the full map (default: 3)")
+    q.add_argument("--zoom",type=float,default=6.,
+                   help="follow camera magnification relative to the full map (default: 6)")
     return p
 
 
