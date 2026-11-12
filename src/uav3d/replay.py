@@ -52,12 +52,15 @@ def follow_camera(ax, target, bounds, max_z, zoom):
     return scale, (x-span/2, y-span/2, x+span/2, y+span/2)
 
 
-# Layering with ``computed_zorder=False``: paving (0) < hidden overlays
-# (HIDDEN_LAYER) < depth-sorted scenery (1) < visible overlays (>= 2).
-# Overlay parts whose view ray is blocked by an obstacle volume are drawn
-# beneath the scenery, so the obstacle covers them where its mesh is solid
-# and they still show through gaps (e.g. between tree crown lobes).
-HIDDEN_LAYER = .5
+# Layering with ``computed_zorder=False``: paving (0) < depth-sorted scenery
+# (1) < raised obstacle groups and the hidden overlays between them (OCCLUSION
+# band) < visible overlays (>= 2). An overlay part whose view ray is blocked by
+# obstacle volumes is drawn just beneath the farthest of those obstacles: they
+# (and any obstacle in front of them) cover it where their mesh is solid, it
+# still shows through gaps (e.g. between tree crown lobes), and scenery farther
+# from the camera than its occluders never paints over it.
+OCCLUSION = (1.2, 1.9)
+HIDDEN_LAYER = 1.1  # hidden overlays before a LayerPlan places them
 
 
 def view_directions(projection, points):
@@ -73,11 +76,11 @@ def view_directions(projection, points):
     return direction/np.linalg.norm(direction, axis=1, keepdims=True)
 
 
-def occluded(projection, points, boxes):
-    """True where the ray from a point to the camera crosses an obstacle box."""
+def occluders(projection, points, boxes):
+    """(points × boxes) mask: the ray from a point to the camera crosses a box."""
     points = np.asarray(points, dtype=float).reshape(-1, 3)
     if len(points) == 0 or len(boxes) == 0:
-        return np.zeros(len(points), dtype=bool)
+        return np.zeros((len(points), len(boxes)), dtype=bool)
     direction = view_directions(projection, points)
     direction[np.abs(direction) < 1e-12] = 1e-12
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -85,7 +88,79 @@ def occluded(projection, points, boxes):
         upper = (boxes[None, :, 1] - points[:, None])/direction[:, None]
     near = np.minimum(lower, upper).max(axis=2)
     far = np.maximum(lower, upper).min(axis=2)
-    return (far >= np.maximum(near, 0.)).any(axis=1)
+    return far >= np.maximum(near, 0.)
+
+
+def occluded(projection, points, boxes):
+    """True where the ray from a point to the camera crosses an obstacle box."""
+    return occluders(projection, points, boxes).any(axis=1)
+
+
+def box_depths(projection, boxes):
+    """Projected box corners: screen bounds (low, high) and mean depth per box."""
+    boxes = np.asarray(boxes, dtype=float).reshape(-1, 2, 3)
+    corners = np.array([[[box[i][0], box[j][1], box[k][2]]
+                         for i in (0, 1) for j in (0, 1) for k in (0, 1)]
+                        for box in boxes]).reshape(-1, 3)
+    screen = np.c_[corners, np.ones(len(corners))] @ projection.T
+    screen = (screen[:, :3]/screen[:, 3:]).reshape(len(boxes), 8, 3)
+    # Smaller depth is nearer the camera.
+    return screen[:, :, :2].min(axis=1), screen[:, :, :2].max(axis=1), screen[:, :, 2].mean(axis=1)
+
+
+def front_obstacles(projection, boxes, seeds):
+    """Occluding boxes plus every box drawn over them (nearer and overlapping).
+
+    Raising only ``seeds`` above the scenery would let an occluder paint over a
+    nearer obstacle in front of it, so those are raised with it.
+    """
+    front = set(int(i) for i in seeds)
+    if not front:
+        return front
+    low, high, depth = box_depths(projection, boxes)
+    pending = list(front)
+    while pending:
+        i = pending.pop()
+        overlap = (low <= high[i]).all(axis=1) & (high >= low[i]).all(axis=1)
+        for j in np.flatnonzero(overlap & (depth < depth[i])):
+            if j not in front:
+                front.add(int(j))
+                pending.append(int(j))
+    return front
+
+
+class LayerPlan:
+    """Interleave raised obstacles and hidden overlays for one frame.
+
+    ``keys`` are the occluder index sets of every hidden overlay part. Raised
+    obstacles are ranked far to near; each hidden part sits just beneath its
+    farthest occluder, so nearer raised obstacles cover it and farther ones
+    (raised for some other part) stay beneath it.
+    """
+
+    def __init__(self, projection, boxes, keys):
+        keys = {frozenset(int(j) for j in key) for key in keys if key}
+        front = front_obstacles(projection, boxes, set().union(*keys) if keys else ())
+        depth = box_depths(projection, boxes)[2] if front else None
+        order = sorted(front, key=lambda j: -depth[j])
+        self.rank = {j: r for r, j in enumerate(order)}
+        cuts = sorted({min(self.rank[j] for j in key) for key in keys})
+        low, high = OCCLUSION
+        self.step = (high-low)/(len(cuts)+1)
+        self.base = low
+        self.group_of_cut = {cut: g+1 for g, cut in enumerate(cuts)}
+        groups = {}
+        for j, r in self.rank.items():
+            # Group 0 (farther than every hidden part) stays in the scenery.
+            groups.setdefault(int(np.searchsorted(cuts, r, side="right")), []).append(j)
+        self.obstacle_layers = [(low + g*self.step, sorted(indices))
+                                for g, indices in sorted(groups.items()) if g > 0]
+
+    def layer(self, key):
+        """(offset, scale) placing an overlay hidden by ``key`` boxes."""
+        g = self.group_of_cut[min(self.rank[int(j)] for j in key)]
+        # Overlay-internal zorders (< 10) stay inside the gap below group g.
+        return self.base + (g-1)*self.step + self.step/4, self.step/40
 
 
 class DepthSplitLine:
@@ -93,9 +168,18 @@ class DepthSplitLine:
 
     def __init__(self, ax, zorder=2., segment=None, **style):
         self.segment = segment  # optional maximum segment length for testing
+        self.ax, self.zorder = ax, zorder
         self.front = ax.plot([], [], [], zorder=zorder, **style)[0]
         style.pop("label", None)
-        self.back = ax.plot([], [], [], zorder=HIDDEN_LAYER+zorder/100, **style)[0]
+        self.style = style
+        # One artist per layer used by hidden parts; more are added on demand.
+        self.backs = [ax.plot([], [], [], zorder=HIDDEN_LAYER+zorder/100, **style)[0]]
+        self.pieces = []  # (occluder key, points) of hidden parts, in order
+
+    @property
+    def back(self):
+        """The first hidden-part artist (all hidden parts before ``place``)."""
+        return self.backs[0]
 
     def _subdivide(self, points):
         if self.segment is None or len(points) < 2:
@@ -107,25 +191,49 @@ class DepthSplitLine:
         return np.concatenate(pieces)
 
     def update(self, points, projection, boxes):
+        """Split the line by occlusion; return the occluder sets of hidden parts.
+
+        Hidden parts are drawn at HIDDEN_LAYER until ``place`` assigns layers.
+        """
         points = self._subdivide(np.asarray(points, dtype=float).reshape(-1, 3))
-        if len(points) < 2:
-            hidden = occluded(projection, points, boxes)
-            for artist, mask in ((self.front, ~hidden), (self.back, hidden)):
-                p = points[mask]
-                artist.set_data_3d(p[:, 0], p[:, 1], p[:, 2])
-            return
-        hidden = occluded(projection, (points[:-1]+points[1:])/2, boxes)
-        # Consecutive segments of one layer stay one path (so dash patterns
-        # continue); a NaN row breaks the path where the layer changes.
-        breaks = np.flatnonzero(np.diff(hidden)) + 1
-        runs = zip(np.r_[0, breaks], np.r_[breaks, len(hidden)])
-        paths = {False: [], True: []}
+        single = len(points) < 2
+        blocked = occluders(projection, points if single else (points[:-1]+points[1:])/2,
+                            boxes)
+        keys = [frozenset(np.flatnonzero(row).tolist()) for row in blocked]
+        # Consecutive segments with one occluder set stay one path (so dash
+        # patterns continue); a NaN row breaks the path where it changes.
+        visible, self.pieces = [], []
         gap = np.full((1, 3), np.nan)
-        for start, stop in runs:
-            paths[bool(hidden[start])] += [points[start:stop+1], gap]
-        for artist, key in ((self.front, False), (self.back, True)):
-            p = np.concatenate(paths[key]) if paths[key] else np.empty((0, 3))
+        start = 0
+        for stop in range(1, len(keys)+1):
+            if stop < len(keys) and keys[stop] == keys[start]:
+                continue
+            chunk = points[start:stop] if single else points[start:stop+1]
+            if keys[start]:
+                self.pieces.append((keys[start], chunk))
+            else:
+                visible += [chunk, gap]
+            start = stop
+        p = np.concatenate(visible) if visible else np.empty((0, 3))
+        self.front.set_data_3d(p[:, 0], p[:, 1], p[:, 2])
+        self.place(None)
+        return {key for key, _ in self.pieces}
+
+    def place(self, plan):
+        """Draw hidden parts at the layers ``plan`` (a LayerPlan) assigns."""
+        layers = {}
+        gap = np.full((1, 3), np.nan)
+        for key, chunk in self.pieces:
+            offset, scale = plan.layer(key) if plan is not None else (HIDDEN_LAYER, .01)
+            layers.setdefault(offset + scale*self.zorder, []).extend([chunk, gap])
+        while len(self.backs) < len(layers):
+            self.backs.append(self.ax.plot([], [], [], **self.style)[0])
+        for artist, (zorder, chunks) in zip(self.backs, sorted(layers.items())):
+            p = np.concatenate(chunks)
+            artist.set_zorder(zorder)
             artist.set_data_3d(p[:, 0], p[:, 1], p[:, 2])
+        for artist in self.backs[len(layers):]:
+            artist.set_data_3d([], [], [])
 
 
 FIGURE_SPACE = "\u2007"  # as wide as a digit in proportional fonts such as DejaVu Sans
@@ -248,7 +356,7 @@ def render(args):
     fig.add_artist(Rectangle((0, 1-band), 1, band, transform=fig.transFigure,
                              facecolor="white", edgecolor="none", zorder=10))
     height = max(5.,float(states[:,:,2].max())*1.3)
-    draw_city(ax, (xmin,ymin,xmax,ymax), cfg["scenario_definition"]["rects"],
+    city = draw_city(ax, (xmin,ymin,xmax,ymax), cfg["scenario_definition"]["rects"],
               cfg["scenario_definition"]["circles"], height)
     boxes = occluder_bounds(cfg["scenario_definition"]["rects"],
                             cfg["scenario_definition"]["circles"], height)
@@ -276,17 +384,25 @@ def render(args):
             follow_camera(ax, targets[index], (xmin,ymin,xmax,ymax), max_z, zoom)
         projection = ax.get_proj()
         stride = max(1,index//1000)
-        hidden = occluded(projection, s[:,:3], boxes)
+        blocked = occluders(projection, s[:,:3], boxes)
+        keys = {frozenset(np.flatnonzero(row).tolist()) for row in blocked}
         for i in range(n):
             # Keep the newest sample so the trail reaches the aircraft.
-            trails[i].update(np.r_[states[:index:stride,i,:3], s[None,i,:3]],
-                             projection, boxes)
+            keys |= trails[i].update(np.r_[states[:index:stride,i,:3], s[None,i,:3]],
+                                     projection, boxes)
             aircraft[i].update(s[i,:3], s[i,6:10])
-            aircraft[i].set_layer(*((HIDDEN_LAYER, .01) if hidden[i] else (0., 1.)))
-            footprints[i].update(square+np.r_[s[i,:2],.05], projection, boxes)
-        target_line.update(np.r_[targets[:index:stride], targets[None,index]],
-                           projection, boxes)
-        target_marker.update(targets[index,None,:], projection, boxes)
+            keys |= footprints[i].update(square+np.r_[s[i,:2],.05], projection, boxes)
+        keys |= target_line.update(np.r_[targets[:index:stride], targets[None,index]],
+                                   projection, boxes)
+        keys |= target_marker.update(targets[index,None,:], projection, boxes)
+        # Raise only obstacles that hide an overlay, interleaved by depth.
+        plan = LayerPlan(projection, boxes, keys)
+        city.set_layers(plan.obstacle_layers)
+        for i in range(n):
+            key = frozenset(np.flatnonzero(blocked[i]).tolist())
+            aircraft[i].set_layer(*(plan.layer(key) if key else (0., 1.)))
+        for line in (*trails, *footprints, target_line, target_marker):
+            line.place(plan)
         title.set_text(title_text(cfg["scenario"], cfg["controller"], n, speed, times[index],
                                   solve_time_label(releases, solves, times[index]),
                                   separations[index], bool(times[index] >= hit_time)))

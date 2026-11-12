@@ -211,6 +211,36 @@ def draw_city(ax, bounds, rects, circles, height):
     # Smooth moving window edges; matching edge strokes seal adjacent tiles.
     scenery = Poly3DCollection([], zorder=1, antialiaseds=True, snap=False)
     ax.add_collection3d(scenery, autolim=False)
+    # Obstacles that occlude a replay overlay this frame are moved into raised
+    # layers interleaved with the hidden overlays (see replay.LayerPlan).
+    raised = []
+    state = {"window": ground_bounds, "layers": ()}
+
+    def fill(collection, meshes):
+        polys, face_colors, edges, widths = zip(*meshes) if meshes else ([],)*4
+        collection.set_verts(list(polys))
+        collection.set_facecolor(list(face_colors))
+        collection.set_edgecolor(list(edges))
+        collection.set_linewidth([max(width, .2) for width in widths])
+
+    def refresh():
+        x0, y0, x1, y1 = state["window"]
+        layer_of = {j: g for g, (_, indices) in enumerate(state["layers"])
+                    for j in indices}
+        back, groups = [], [[] for _ in state["layers"]]
+        for index, ((left, bottom, right, top), meshes) in enumerate(obstacles):
+            if x0 <= left and right <= x1 and y0 <= bottom and top <= y1:
+                (groups[layer_of[index]] if index in layer_of else back).extend(meshes)
+        # Batch faces so mplot3d sorts individual faces, not whole objects.
+        fill(scenery, back)
+        while len(raised) < len(groups):
+            raised.append(Poly3DCollection([], antialiaseds=True, snap=False))
+            ax.add_collection3d(raised[-1], autolim=False)
+        for collection, (zorder, _), meshes in zip(raised, state["layers"], groups):
+            collection.set_zorder(zorder)
+            fill(collection, meshes)
+        for collection in raised[len(groups):]:
+            fill(collection, [])
 
     def clip_view(window):
         """Show only scenery inside window; mplot3d does not clip polygons.
@@ -230,18 +260,24 @@ def draw_city(ax, bounds, rects, circles, height):
                 fills.append(color)
         ground.set_verts(kept)
         ground.set_facecolor(fills)
-        visible = [mesh for (left, bottom, right, top), meshes in obstacles
-                   if x0 <= left and right <= x1 and y0 <= bottom and top <= y1
-                   for mesh in meshes]
-        # Batch faces so mplot3d sorts individual faces, not whole objects.
-        polys, face_colors, edges, widths = zip(*visible) if visible else ([],)*4
-        scenery.set_verts(list(polys))
-        scenery.set_facecolor(list(face_colors))
-        scenery.set_edgecolor(list(edges))
-        scenery.set_linewidth([max(width, .2) for width in widths])
+        state["window"] = window
+        refresh()
         return kept
 
+    def set_layers(layers):
+        """Draw obstacles (``occluder_bounds`` order) in raised layers.
+
+        ``layers`` is a sequence of (zorder, obstacle indices); obstacles not
+        listed stay in the depth-sorted scenery layer (zorder 1).
+        """
+        layers = tuple((float(z), tuple(sorted(int(j) for j in indices)))
+                       for z, indices in layers)
+        if layers != state["layers"]:
+            state["layers"] = layers
+            refresh()
+
     clip_view(ground_bounds)
+    clip_view.set_layers = set_layers
     return clip_view
 
 

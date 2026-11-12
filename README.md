@@ -281,9 +281,12 @@ around tree trunks and above the decorative roofs/crowns. High-quality artistic
 rendering and a live viewer are outside v1. Aircraft glyphs, trails, FOV
 squares and the target path are depth-occluded by buildings and trees: each
 frame, any part whose view ray toward the camera crosses an obstacle's bounding
-volume is drawn beneath the scenery layer (so solid facades and crowns cover
-it, while gaps between leaves still show it); unblocked parts draw above the
-scenery. Aircraft glyphs switch layer as a whole, based on their centre.
+volume is drawn beneath exactly those occluding obstacles (and any obstacle in
+front of them), which are lifted out of the scenery layer and ordered far to
+near. Solid facades and crowns therefore cover it and gaps between leaves still
+show it, while scenery behind it (e.g. a building behind a UAV hidden by a
+tree) never paints over it. Unblocked parts draw above all scenery. Aircraft
+glyphs switch layer as a whole, based on their centre.
 
 ## Comparison tables
 
