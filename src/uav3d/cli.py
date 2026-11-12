@@ -46,6 +46,20 @@ def parser():
                    help="follow the target (default) or show the full map")
     q.add_argument("--zoom",type=float,default=6.,
                    help="follow camera magnification relative to the full map (default: 6)")
+    env = os.environ.get
+    q.add_argument("--jobs",default=env("UAV3D_REPLAY_JOBS","auto"),
+                   help="MP4 render worker processes: 'auto' (default; sized from available "
+                        "CPUs, memory and frame count) or N; 1 = serial export "
+                        "[env UAV3D_REPLAY_JOBS]")
+    q.add_argument("--max-memory",default=env("UAV3D_REPLAY_MAX_MEMORY_GB","auto"),
+                   help="memory budget in GiB used to cap '--jobs auto' (default: 80%% of "
+                        "available memory) [env UAV3D_REPLAY_MAX_MEMORY_GB]")
+    q.add_argument("--queue-frames",type=int,default=int(env("UAV3D_REPLAY_QUEUE_FRAMES","4")),
+                   help="encoded-size frames each worker may buffer in memory ahead of the "
+                        "encoder (default: 4) [env UAV3D_REPLAY_QUEUE_FRAMES]")
+    q.add_argument("--encoder-threads",default=env("UAV3D_REPLAY_ENCODER_THREADS","auto"),
+                   help="x264 threads: 'auto' (default, ffmpeg's choice) or N "
+                        "[env UAV3D_REPLAY_ENCODER_THREADS]")
     return p
 
 
@@ -119,6 +133,12 @@ def main(argv=None):
             p.error("--fps and --speed must be positive")
         if not math.isfinite(args.zoom) or args.zoom<=0:
             p.error("--zoom must be finite and positive")
+        from .video import plan_export
+        try:
+            plan_export(1, args.jobs, args.max_memory, args.queue_frames, args.encoder_threads,
+                        cpus=1, memory=None)
+        except ValueError as error:
+            p.error(str(error))
         from .replay import render
         render(args)
         return 0

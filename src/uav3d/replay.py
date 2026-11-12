@@ -61,6 +61,20 @@ def follow_camera(ax, target, bounds, max_z, zoom):
 # from the camera than its occluders never paints over it.
 OCCLUSION = (1.2, 1.9)
 HIDDEN_LAYER = 1.1  # hidden overlays before a LayerPlan places them
+# Hidden parts of different overlays can share a layer zorder; matplotlib then
+# draws them in artist creation order, and hidden-part artists are created on
+# demand, so that order would depend on which frames were drawn before. A tiny
+# per-overlay offset (far below the smallest gap between distinct layer zorders)
+# draws such ties in overlay construction order instead, so every frame is a
+# function of its mission time alone, as parallel MP4 export requires.
+TIE_BREAK = 1e-10
+
+
+def overlay_rank(ax):
+    """Construction index of the next depth-split overlay on ``ax``."""
+    rank = getattr(ax, "_uav3d_overlay_count", 0)
+    ax._uav3d_overlay_count = rank + 1
+    return rank
 
 
 def view_directions(projection, points):
@@ -169,6 +183,7 @@ class DepthSplitLine:
     def __init__(self, ax, zorder=2., segment=None, **style):
         self.segment = segment  # optional maximum segment length for testing
         self.ax, self.zorder = ax, zorder
+        self.rank = overlay_rank(ax)
         self.front = ax.plot([], [], [], zorder=zorder, **style)[0]
         style.pop("label", None)
         self.style = style
@@ -230,7 +245,7 @@ class DepthSplitLine:
             self.backs.append(self.ax.plot([], [], [], **self.style)[0])
         for artist, (zorder, chunks) in zip(self.backs, sorted(layers.items())):
             p = np.concatenate(chunks)
-            artist.set_zorder(zorder)
+            artist.set_zorder(zorder + self.rank*TIE_BREAK)
             artist.set_data_3d(p[:, 0], p[:, 1], p[:, 2])
         for artist in self.backs[len(layers):]:
             artist.set_data_3d([], [], [])
@@ -246,6 +261,7 @@ class DepthSplitPolys:
     def __init__(self, ax, zorder=2., **style):
         from mpl_toolkits.mplot3d.art3d import Poly3DCollection
         self.ax, self.zorder, self.style = ax, zorder, style
+        self.rank = overlay_rank(ax)
         self._make = lambda z: ax.add_collection3d(Poly3DCollection([], zorder=z, **style))
         self.front = self._make(zorder)
         self.backs = []
@@ -282,7 +298,7 @@ class DepthSplitPolys:
         while len(self.backs) < len(layers):
             self.backs.append(self._make(HIDDEN_LAYER))
         for artist, (zorder, indices) in zip(self.backs, sorted(layers.items())):
-            artist.set_zorder(zorder)
+            artist.set_zorder(zorder + self.rank*TIE_BREAK)
             self._fill(artist, self.polygons[indices], self.colors[indices])
         for artist in self.backs[len(layers):]:
             self._fill(artist, np.empty((0, 3, 3)), np.empty((0, 4)))
@@ -380,15 +396,23 @@ def title_text(scenario, map_size, controller, n, speed, t, solve_label, separat
             f"Minimum UAV - Obstacles Distance: {bold(distance_label(clearance))} m")
 
 
-def render(args):
+def video_frame_times(times, speed, fps):
+    """Mission times of the MP4 frames; shared by serial and parallel export."""
+    return np.r_[np.arange(0, times[-1], speed/fps), times[-1]]
+
+
+def build_scene(args):
+    """Build the replay figure; return (figure, update(t), recorded times).
+
+    Each frame is a function of its mission time only, so worker processes can
+    each build their own scene and draw any subset of frames.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation, FFMpegWriter
     from matplotlib.patches import Rectangle
     from .scene import draw_city, occluder_bounds
     from .aircraft import QuadcopterGlyph
-    import imageio_ffmpeg
     directory = Path(args.directory)
     cfg = json.loads((directory/"config.json").read_text())
     with np.load(directory/"trajectory.npz") as archive:
@@ -402,10 +426,6 @@ def render(args):
                                         cfg["scenario_definition"]["circles"])
     map_size = map_size_label(cfg["params"]["WORLD_BOUNDS"])
     speed = float(getattr(args, "speed", 1.))
-    output = Path(args.out or directory/"replay.png")
-    if output.suffix.lower() not in (".png",".mp4"):
-        raise ValueError("Replay output must end in .png or .mp4")
-    output.parent.mkdir(parents=True,exist_ok=True)
     fig = plt.figure(figsize=(12,8),facecolor="#f3f5f9")
     # Explicit layers: ground, depth-sorted obstacles, then aircraft overlays.
     # Automatic collection ordering can put the ground above whole buildings.
@@ -484,22 +504,22 @@ def render(args):
                                   times[index], solve_time_label(releases, solves, times[index]),
                                   separations[index], clearances[index]))
         return []
+    return fig, update, times
+
+
+def render(args):
+    import matplotlib.pyplot as plt
+    from . import video
+    directory = Path(args.directory)
+    output = Path(args.out or directory/"replay.png")
+    if output.suffix.lower() not in (".png",".mp4"):
+        raise ValueError("Replay output must end in .png or .mp4")
+    output.parent.mkdir(parents=True,exist_ok=True)
     if output.suffix.lower()==".png":
+        fig, update, times = build_scene(args)
         update(times[-1] if args.time is None else args.time)
         fig.savefig(output,dpi=180)
+        plt.close(fig)
     else:
-        matplotlib.rcParams["animation.ffmpeg_path"] = imageio_ffmpeg.get_ffmpeg_exe()
-        frames = np.r_[np.arange(0,times[-1],args.speed/args.fps),times[-1]]
-        animation = FuncAnimation(fig,update,frames=frames,interval=1000/args.fps,blit=False)
-        # Supersample smoothed mesh faces, then filter to the delivery resolution.
-        # Direct rasterization makes subpixel window mullions jump between pixel
-        # columns during camera pans. Matching edge strokes seal facade tiles;
-        # downsampling the completed frame also stabilizes subpixel details.
-        animation.save(output, dpi=480,
-                       writer=FFMpegWriter(
-                           fps=args.fps, codec="libx264",
-                           extra_args=["-vf", "scale=iw/3:ih/3:flags=lanczos",
-                                       "-crf", "18", "-pix_fmt", "yuv420p",
-                                       "-movflags", "+faststart"]))
-    plt.close(fig)
+        video.export(args, output)
     print(output)

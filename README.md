@@ -290,7 +290,44 @@ tree) never paints over it. Unblocked parts draw above all scenery. Aircraft
 glyphs are split piece by piece: hull faces into small triangles (back faces
 culled), and arms, rotor rings, hull outlines and the nose stripe into short
 segments, so a building edge sweeps across the body and rotors gradually
-instead of whole parts popping in or out.
+instead of whole parts popping in or out. Hidden parts of different overlays
+that share a layer are drawn in overlay construction order (a 1e-10 zorder
+tie-break), so each frame depends only on its mission time, not on which
+frames were drawn before it.
+
+### Parallel MP4 export
+
+MP4 frames are drawn by several worker processes by default. Each worker builds
+its own scene, draws an interleaved share of the frames through matplotlib's
+normal animation path, and runs a private ffmpeg that applies the same Lanczos
+downscale and yuv420p conversion as the serial export. The main process puts
+the frames back in order through small in-memory queues and streams them into
+one x264 encoder (CRF 18, same settings as before). There are no intermediate
+frame or segment files, so disk use is just the final MP4. It is written as a
+hidden `.<name>.partial.mp4` beside the output and renamed when complete, so a
+failed or interrupted export leaves no truncated video. Frames reach the encoder
+exactly as a serial export produces them, so for the same settings the MP4 is
+byte-identical to `--jobs 1` (checked in `tests/test_replay_video.py`).
+
+| Flag | Environment default | Meaning |
+|---|---|---|
+| `--jobs auto\|N` | `UAV3D_REPLAY_JOBS` | worker processes; `auto` takes the smallest of the CPU limit `CPUs − 4`, the memory budget divided by the per-worker estimate, and one worker per 8 frames; `1` runs the original serial export |
+| `--max-memory auto\|GiB` | `UAV3D_REPLAY_MAX_MEMORY_GB` | memory budget for `--jobs auto`; `auto` = 80% of available memory (cgroup limits respected) |
+| `--queue-frames N` | `UAV3D_REPLAY_QUEUE_FRAMES` | delivery-size frames (3.7 MB each) a worker may buffer ahead of the encoder (default 4) |
+| `--encoder-threads auto\|N` | `UAV3D_REPLAY_ENCODER_THREADS` | x264 threads (default: ffmpeg's choice); a different count may change the bitstream slightly, not the quality target |
+
+CPU count follows the process affinity mask and any cgroup CPU quota. Each
+worker needs about 0.7 GiB at the 5760 × 3840 render size, and the encoder about
+3.5 GiB. An explicit `--jobs` above the CPU count or the memory budget is
+honoured with a warning. Before rendering, replay warns if the output
+filesystem has less than twice the estimated video size free (~40 kB per frame).
+Progress (frame, frames/s, remaining time) is printed to stderr every 15 s.
+
+```bash
+uv run uav3d replay runs/ours-demo --out exports/ours.mp4 --speed 5 --fps 24            # auto
+uv run uav3d replay runs/ours-demo --out exports/ours.mp4 --jobs 8 --max-memory 16      # shared host
+UAV3D_REPLAY_JOBS=1 uv run uav3d replay runs/ours-demo --out exports/ours.mp4           # serial
+```
 
 ## Comparison tables
 
