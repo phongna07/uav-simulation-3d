@@ -10,7 +10,7 @@ import platform
 import subprocess
 import time
 import numpy as np
-from .physics import RotorPyBackend
+from .physics import RotorPyBackend, resolve_physics_workers
 from .scheduler import next_release, parallel_events, plan_against_snapshot, scaled_delay
 from . import upstream
 
@@ -144,7 +144,9 @@ def run(args):
     horizon = min(full_duration,args.duration) if args.duration is not None else full_duration
     if horizon <= 0:
         raise ValueError("Mission duration must be positive")
-    backend = RotorPyBackend(starts,args.physics_dt)
+    # Parallel stepping is bit-identical to serial stepping; it only uses more cores.
+    physics_workers = resolve_physics_workers(getattr(args,"physics_workers","auto"),len(starts))
+    backend = RotorPyBackend(starts,args.physics_dt,physics_workers)
     # "ours" executes its whole plan by mission time; other methods hold the latest command.
     follow_plan = cfg.CONTROLLER == "ours"
     execution = "tracked_plan_with_watchdog" if follow_plan else "hold_latest"
@@ -180,7 +182,8 @@ def run(args):
                          seed=args.seed,starts=starts,scenario_definition=cfg.SCENARIO_DEF,
                          params={k:v for k,v in vars(cfg).items() if k.isupper()},
                          horizon_s=horizon,full_target_duration_s=full_duration,
-                         physics_dt=args.physics_dt,planning_period=cfg.TIMESTEP,
+                         physics_dt=args.physics_dt,physics_workers=physics_workers,
+                         planning_period=cfg.TIMESTEP,
                          scheduling="parallel",command_execution=execution,
                          compute_ratio=ratio,
                          plan_tracking=dict(kp=upstream.TRACK_KP,kd=upstream.TRACK_KD,
@@ -318,6 +321,7 @@ def run(args):
         raise
     finally:
         wall = time.perf_counter()-wall_start
+        backend.close()
         np.savez_compressed(out/"trajectory.npz",time=np.array(sim.times),
                             aircraft=np.array(sim.aircraft),target=np.array(sim.targets),
                             command=np.array(sim.commands),status=np.array(sim.statuses),

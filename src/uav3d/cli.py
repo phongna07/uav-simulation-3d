@@ -19,6 +19,11 @@ def parser():
         q.add_argument("--seed",type=int,default=0)
         q.add_argument("--duration",type=float,help="mission seconds; default: full target trajectory")
         q.add_argument("--physics-dt",type=float,default=.005)
+        q.add_argument("--physics-workers",default=os.environ.get("UAV3D_PHYSICS_WORKERS","auto"),
+                       help="processes that step the aircraft each physics step: 'auto' "
+                            "(default; one per drone, capped by available CPUs) or N; 1 = serial "
+                            "in-process stepping. Results are bit-identical for every value "
+                            "[env UAV3D_PHYSICS_WORKERS]")
         q.add_argument("--out",help="new output directory (must not already exist)")
         q.add_argument("--timings-from",help="run directory containing previously measured delays")
         q.add_argument("--compute-ratio",type=float,default=0.,
@@ -66,7 +71,8 @@ def parser():
 def worker_command(args, controller, output):
     command = [sys.executable,"-m","uav3d.cli","_worker","--scenario",args.scenario,
                "--controller",controller,"--seed",str(args.seed),"--physics-dt",str(args.physics_dt),
-               "--compute-ratio",repr(args.compute_ratio),"--out",str(output)]
+               "--compute-ratio",repr(args.compute_ratio),
+               "--physics-workers",str(args.physics_workers),"--out",str(output)]
     for name in ("duration","timings_from"):
         value = getattr(args,name)
         if value is not None:
@@ -85,6 +91,8 @@ def main(argv=None):
             p.error("--duration must be finite and positive")
         if not math.isfinite(args.compute_ratio) or args.compute_ratio<0:
             p.error("--compute-ratio must be finite and nonnegative")
+        if args.physics_workers!="auto" and not (args.physics_workers.isdigit() and int(args.physics_workers)>=1):
+            p.error("--physics-workers must be 'auto' or a positive integer")
     if args.command=="_worker":
         from threadpoolctl import threadpool_limits
         from .experiment import run

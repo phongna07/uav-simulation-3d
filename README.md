@@ -58,7 +58,7 @@ uv run uav3d collect                      # pick from a numbered list of runs
 ```
 
 Select `--controller ours|apf|pure_mpc|cbf_qp_lag|impc_ob_rec`, `--scenario scen1`,
-`--seed 0`, or `--physics-dt 0.0025` explicitly as needed. Benchmark supports a
+`--seed 0`, `--physics-dt 0.0025`, or `--physics-workers 1` explicitly as needed. Benchmark supports a
 `--controllers` subset. Output directories must be new, preventing accidental
 overwrites. A completed run or a detected collision exits successfully; the
 result artifact distinguishes them. A benchmark continues after a failed child
@@ -196,6 +196,20 @@ Physics/control run at 200 Hz by default, with exact event-boundary step splits
 and RK45 tolerances `rtol=1e-6`, `atol=1e-9`. The backend interface supports a
 future implementation; CUDA/batched physics is not implemented in v1.
 
+`--physics-workers auto|N` (default `auto`: one process per drone, capped by
+available CPUs; env `UAV3D_PHYSICS_WORKERS`) steps the aircraft in parallel
+processes, one physics step at a time. It is a host-speed option only and is
+**bit-identical** to serial stepping (`--physics-workers 1`): each RotorPy
+step depends only on that vehicle's state and command, the main process keeps
+every state (so snapshot/restore and collision step splits are unchanged),
+and the main process consumes RotorPy's zero-scale motor-noise draws from the
+global NumPy RNG exactly as serial stepping does, so upstream's random stream
+is unaffected. It applies to every controller. Workers block idle while
+planners run, so planner timings are not affected. `config.json` records
+`physics_workers`. Planner solves stay sequential: upstream robots share
+per-round leader/slot state and (for IMPC) each other's solver objects, so
+they cannot be split across processes without changing upstream.
+
 Obstacle footprints are vertical columns through the flight region. Collision
 checks sweep the scenario's safety-radius sphere against other drones, and its
 horizontal disk against circles and rounded expanded rectangles between
@@ -204,6 +218,10 @@ contact, safety-envelope exit from horizontal world bounds, and nonfinite
 states also fail the run. This is a conservative safety-envelope test, not
 mesh-level impact dynamics. Sweeps approximate the curved motion within each
 5 ms physics interval by a line. No bouncing/contact response is simulated.
+A conservative bounding-box broad phase skips only obstacles, boundaries and
+drone pairs that cannot be reached within a step; the remaining candidates go
+through the same exact tests in the same order, so the detected hit (time,
+reason, drones, and ties) is identical to testing everything.
 
 ## Artifacts and metrics
 
