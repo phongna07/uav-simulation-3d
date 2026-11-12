@@ -62,7 +62,7 @@ def test_follow_keeps_target_projected_at_center_without_zoom_pumping():
 def test_replay_defaults_to_target_follow():
     args = parser().parse_args(["replay", "recording"])
     assert args.camera == "follow"
-    assert args.zoom == 3
+    assert args.zoom == 6
 
 
 @pytest.mark.parametrize("zoom", ["0", "-1", "nan", "inf"])

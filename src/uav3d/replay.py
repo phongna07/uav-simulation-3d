@@ -420,7 +420,7 @@ def render(args):
     ax.set_zticks(np.linspace(0,max_z,3))
     ax.view_init(elev=35,azim=-65)
     following = getattr(args, "camera", "follow") == "follow"
-    zoom = getattr(args, "zoom", 3.)
+    zoom = getattr(args, "zoom", 6.)
     if following:
         ax.view_init(elev=55, azim=-65)
         ax.set_proj_type("ortho")
@@ -444,7 +444,7 @@ def render(args):
     n = states.shape[1]
     colors = plt.cm.Set1(np.arange(n)%9)
     # Enlarge only the aircraft illustration for field-scale readability.
-    glyph = max(1.,(xmax-xmin)*.008)
+    glyph = max(1.,(xmax-xmin)*.0025)
     half = cfg["params"]["VIEWING_RADIUS"]
     trails,aircraft,footprints = [],[],[]
     for i in range(n):

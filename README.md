@@ -245,7 +245,7 @@ colored bodies, four rotor rings, and white nose stripes follow recorded attitud
 and are enlarged for field-scale visibility; the vertical display aspect is also
 exaggerated when needed. Aircraft
 positions, target, footprints, and obstacles use their recorded coordinates.
-The default camera follows the recorded target at 3× magnification with a
+The default camera follows the recorded target at 6× magnification with a
 55-degree downward view and fixed heading. The target stays centered even near
 map edges; distant drones may leave the frame. Tracking pans the camera projection;
 world axis limits, ground paving, and obstacle coordinates stay fixed. `--zoom` adjusts magnification,
