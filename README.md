@@ -254,7 +254,7 @@ change the trajectory or simulation.
 The scenery viewport fills the entire output frame without stretching the map;
 the title sits on an opaque white overlay, sized to give the two lines equal
 top and bottom padding, and the UAV legend (UAVs numbered from 1) sits below it.
-The first line reads `Scenario: … · Algorithm: … · N UAVs · Video speed: Sx ·
+The first line reads `Scenario: … · Map size: WxH m · Algorithm: … · N UAVs · Video speed: Sx ·
 t = … s`, where the video speed is `--speed` (mission seconds per video second).
 The second line shows the max solve time
 `d = max_i C_i` of the latest planning round released at or before the frame
@@ -262,10 +262,11 @@ time, read from `events.jsonl`. `C_i` is the raw host duration (the injected
 delay divided by `--compute-ratio`, or the measured duration when the ratio is
 0), so `d` does not depend on the ratio. It continues with the minimum UAV
 separation distance (smallest 3D centre-to-centre distance between any two
-UAVs in that frame, as in the `min_inter_uav_m` metric) and `Is UAV colliding?`,
-which turns `True` from the contact time recorded in `result.json` (any obstacle,
-boundary, ground or UAV-UAV contact; such a contact ends the run). Values are
-bold. Mission time, `d` and the separation use fixed-width,
+UAVs in that frame, as in the `min_inter_uav_m` metric) and the minimum UAV -
+obstacles distance (smallest horizontal distance from any UAV centre to the
+nearest rectangle or circle obstacle footprint, matching the collision model's
+vertical obstacle columns; 0 inside one). Values are
+bold. Mission time, `d` and both distances use fixed-width,
 digit-wide padding so the centered title does not shift between frames. World axes and their labels are hidden for a clean video frame.
 MP4 export uses an environment-managed FFmpeg binary. Replay uses dark gray
 running-bond brick paving and buildings on rectangular obstacle footprints
@@ -286,7 +287,10 @@ front of them), which are lifted out of the scenery layer and ordered far to
 near. Solid facades and crowns therefore cover it and gaps between leaves still
 show it, while scenery behind it (e.g. a building behind a UAV hidden by a
 tree) never paints over it. Unblocked parts draw above all scenery. Aircraft
-glyphs switch layer as a whole, based on their centre.
+glyphs are split piece by piece: hull faces into small triangles (back faces
+culled), and arms, rotor rings, hull outlines and the nose stripe into short
+segments, so a building edge sweeps across the body and rotors gradually
+instead of whole parts popping in or out.
 
 ## Comparison tables
 

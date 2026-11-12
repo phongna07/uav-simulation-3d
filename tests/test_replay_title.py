@@ -3,7 +3,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from uav3d.replay import (FIGURE_SPACE, bold, fixed_width, min_separations, round_solve_times,
+from uav3d.replay import (FIGURE_SPACE, bold, fixed_width, map_size_label, min_obstacle_distances,
+                          min_separations, round_solve_times,
                           solve_time_label, speed_label, title_text)
 
 
@@ -38,7 +39,7 @@ def test_fixed_width_text_keeps_rendered_width():
               for v in (0., 1.111, 9.999, 10., 123.456, 749.)}
     solves = {fig.text(.5, .5, solve_time_label(np.array([0.]), np.array([v]), 0.)).get_window_extent(renderer).width
                for v in (.0011, .0518, .9999, 2.0359)}
-    gaps = {fig.text(.5, .5, title_text("s", "c", 2, 5., 1., "", v, False)).get_window_extent(renderer).width
+    gaps = {fig.text(.5, .5, title_text("s", "1000x1000 m", "c", 2, 5., 1., "", v, v)).get_window_extent(renderer).width
             for v in (.5, 9.99, 43.07, 120.)}
     plt.close(fig)
     for widths in (times, solves, gaps):
@@ -46,13 +47,17 @@ def test_fixed_width_text_keeps_rendered_width():
 
 
 def test_title_follows_template_with_bold_values():
-    text = title_text("scen1", "pure_mpc", 5, 5., 194.58, "Max solve time d = x ms", 43.07, False)
+    text = title_text("scen1", "1000x1000 m", "pure_mpc", 5, 5., 194.58,
+                      "Max solve time d = x ms", 43.07, 7.5)
     first, second = text.split("\n")
-    assert first.startswith("Scenario: $\\mathbf{scen1}$ · Algorithm: $\\mathbf{pure\\_mpc}$ · ")
+    assert first.startswith("Scenario: $\\mathbf{scen1}$ · Map size: $\\mathbf{1000x1000\\ m}$ · "
+                            "Algorithm: $\\mathbf{pure\\_mpc}$ · ")
     assert "$\\mathbf{5}$ UAVs · Video speed: $\\mathbf{5x}$ · t = $\\mathbf{" in first
     assert second.startswith("Max solve time d = x ms · Minimum UAV Separation Distance: ")
-    assert "43.07}$ m · Is UAV colliding? $\\mathbf{False}$" in second
-    assert "n/a" in title_text("s", "c", 1, 1., 0., "", np.nan, True)
+    assert "43.07}$ m · Minimum UAV - Obstacles Distance: $\\mathbf{" in second
+    assert second.endswith("7.50}$ m")
+    assert "n/a" in title_text("s", "m", "c", 1, 1., 0., "", np.nan, 1.)
+    assert "n/a" in title_text("s", "m", "c", 1, 1., 0., "", 1., np.nan)
     assert speed_label(.5) == "0.5x" and speed_label(5.) == "5x"
 
 
@@ -62,3 +67,14 @@ def test_min_separation_is_closest_pair_per_sample():
     states[:, 2, :3] = [[0., 4., 0.], [0., 0., 2.]]
     assert np.allclose(min_separations(states), [3., 1.])
     assert np.isnan(min_separations(states[:, :1])).all()
+
+
+def test_min_obstacle_distance_uses_column_footprints():
+    states = np.zeros((3, 2, 13))
+    # One rectangle [10,20]x[0,10] and one circle at (50, 0) with radius 5.
+    states[:, 0, :3] = [[0., 5., 30.], [13., 5., 1.], [23., 14., 0.]]
+    states[:, 1, :3] = [[50., 12., 0.], [80., 0., 0.], [80., 0., 0.]]
+    d = min_obstacle_distances(states, [(10, 0, 10, 10)], [(50, 0, 5)])
+    assert np.allclose(d, [7., 0., 5.])
+    assert np.isnan(min_obstacle_distances(states, [], [])).all()
+    assert map_size_label((0, 0, 1000, 1000)) == "1000x1000 m"

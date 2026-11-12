@@ -6,8 +6,8 @@ import pytest
 
 from uav3d import scene
 from uav3d.aircraft import QuadcopterGlyph
-from uav3d.replay import (HIDDEN_LAYER, DepthSplitLine, TargetFollowAxes,
-                          LayerPlan, follow_camera, front_obstacles, occluded,
+from uav3d.replay import (DepthSplitLine, TargetFollowAxes,
+                          LayerPlan, follow_camera, front_obstacles, occluded, occluders,
                           view_directions)
 
 BUILDING = (480, 480, 40, 40)
@@ -60,10 +60,47 @@ def test_split_line_and_glyph_change_layers():
     assert 1 < line.back.get_zorder() < 2 <= line.front.get_zorder()
 
     glyph = QuadcopterGlyph(ax, "red", 2)
-    glyph.set_layer(HIDDEN_LAYER, .01)
-    assert all(1 < artist.get_zorder() < 2 for artist, _ in glyph._layers)
-    glyph.set_layer()
-    assert [a.get_zorder() for a, _ in glyph._layers] == [6, 5, 7, 8]
+    glyph.update([200, 200, 5], [0, 0, 0, 1], ax.get_proj(), boxes)
+    glyph.place()
+    assert [p.front.get_zorder() for p in glyph.parts] == [6] + [6.5]*15 + [5]*4 + [7]*4 + [8]
+    # A level aircraft seen from above shows its top and some sides, not its belly.
+    colors = glyph.shell.front.get_facecolor()
+    assert len(colors) and not np.isclose(colors, plt.matplotlib.colors.to_rgba("#334155")).all(axis=1).any()
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("proj_type", ["ortho", "persp"])
+def test_glyph_parts_are_partly_hidden_at_a_building_edge(proj_type):
+    """A ring straddling a building silhouette is split, not hidden whole."""
+    fig, ax = axes(proj_type)
+    boxes = scene.occluder_bounds([BUILDING], [], 40)
+    toward = camera_side(ax)
+    across = np.cross(toward, [0, 0, 1])
+    projection = ax.get_proj()
+    glyph = QuadcopterGlyph(ax, "red", 20)
+
+    def split_counts(part):
+        if hasattr(part, "polygons"):
+            front = len(part.front.get_paths())
+            back = sum(len(b.get_paths()) for b in part.backs)
+        else:
+            front = np.isfinite(part.front.get_data_3d()[0]).sum()
+            back = sum(np.isfinite(b.get_data_3d()[0]).sum() for b in part.backs)
+        return front > 0 and back > 0
+
+    # Slide the aircraft sideways out from behind the building: each rotor
+    # ring and the hull must pass through a partly hidden state at the edge.
+    ever_split = np.zeros(6, dtype=bool)
+    for offset in np.linspace(0, 80, 321):
+        centre = np.array([500, 500, 10.]) - 45*toward + offset*across
+        keys = glyph.update(centre, [0, 0, 0, 1], projection, boxes)
+        plan = LayerPlan(projection, boxes, keys)
+        glyph.place(plan)
+        fig.canvas.draw()  # Poly3DCollection paths are projected on draw
+        ever_split |= [split_counts(p) for p in (*glyph.rotors, glyph.shell, glyph.indicator)]
+    assert ever_split[:5].all()
+    for part in glyph.parts:
+        assert all(1 < b.get_zorder() < 2 for b in part.backs)
     plt.close(fig)
 
 

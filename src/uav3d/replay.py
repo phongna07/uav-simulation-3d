@@ -236,6 +236,58 @@ class DepthSplitLine:
             artist.set_data_3d([], [], [])
 
 
+class DepthSplitPolys:
+    """3D polygons drawn above the scenery only where nothing occludes them.
+
+    Each polygon is tested at its centroid, so callers pass small pieces (e.g.
+    subdivided faces) to let an obstacle edge sweep across a surface gradually.
+    """
+
+    def __init__(self, ax, zorder=2., **style):
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+        self.ax, self.zorder, self.style = ax, zorder, style
+        self._make = lambda z: ax.add_collection3d(Poly3DCollection([], zorder=z, **style))
+        self.front = self._make(zorder)
+        self.backs = []
+        self.pieces = []  # (occluder key, polygon indices) of hidden groups
+        self.polygons, self.colors = np.empty((0, 3, 3)), np.empty((0, 4))
+
+    @staticmethod
+    def _fill(artist, polygons, colors):
+        artist.set_verts(list(polygons))
+        artist.set_facecolor(colors)
+        artist.set_edgecolor(colors)  # same-colour strokes seal piece seams
+
+    def update(self, polygons, colors, projection, boxes):
+        """Split polygons by occlusion; return the occluder sets of hidden ones."""
+        from matplotlib.colors import to_rgba_array
+        self.polygons = np.asarray(polygons, dtype=float).reshape(-1, *np.shape(polygons)[-2:])
+        self.colors = to_rgba_array(colors)
+        blocked = occluders(projection, self.polygons.mean(axis=1), boxes)
+        groups = {}
+        for i, row in enumerate(blocked):
+            groups.setdefault(frozenset(np.flatnonzero(row).tolist()), []).append(i)
+        visible = groups.pop(frozenset(), [])
+        self._fill(self.front, self.polygons[visible], self.colors[visible])
+        self.pieces = list(groups.items())
+        self.place(None)
+        return set(groups)
+
+    def place(self, plan):
+        """Draw hidden polygons at the layers ``plan`` (a LayerPlan) assigns."""
+        layers = {}
+        for key, indices in self.pieces:
+            offset, scale = plan.layer(key) if plan is not None else (HIDDEN_LAYER, .01)
+            layers.setdefault(offset + scale*self.zorder, []).extend(indices)
+        while len(self.backs) < len(layers):
+            self.backs.append(self._make(HIDDEN_LAYER))
+        for artist, (zorder, indices) in zip(self.backs, sorted(layers.items())):
+            artist.set_zorder(zorder)
+            self._fill(artist, self.polygons[indices], self.colors[indices])
+        for artist in self.backs[len(layers):]:
+            self._fill(artist, np.empty((0, 3, 3)), np.empty((0, 4)))
+
+
 FIGURE_SPACE = "\u2007"  # as wide as a digit in proportional fonts such as DejaVu Sans
 
 
@@ -281,20 +333,51 @@ def min_separations(states):
     return distance.min(axis=(1, 2))
 
 
+def min_obstacle_distances(states, rects, circles):
+    """Smallest UAV-obstacle distance per recorded sample.
+
+    Matches the collision model: obstacles are vertical columns, so this is the
+    horizontal distance from each UAV centre to the nearest rectangle or circle
+    footprint edge (0 inside one), minimised over UAVs. NaN without obstacles.
+    """
+    xy = np.asarray(states, dtype=float)[..., :2]
+    distances = []
+    for x, y, w, h in np.asarray(rects, dtype=float).reshape(-1, 4):
+        dx = np.maximum(np.maximum(x-xy[..., 0], xy[..., 0]-(x+w)), 0.)
+        dy = np.maximum(np.maximum(y-xy[..., 1], xy[..., 1]-(y+h)), 0.)
+        distances.append(np.hypot(dx, dy))
+    for x, y, r in np.asarray(circles, dtype=float).reshape(-1, 3):
+        distances.append(np.maximum(np.hypot(xy[..., 0]-x, xy[..., 1]-y)-r, 0.))
+    if not distances:
+        return np.full(len(xy), np.nan)
+    return np.min(distances, axis=0).min(axis=1)
+
+
+def map_size_label(bounds):
+    """World extent as 'width x height m', e.g. 1000x1000 m."""
+    xmin, ymin, xmax, ymax = bounds
+    return f"{xmax-xmin:g}x{ymax-ymin:g} m"
+
+
+def distance_label(value):
+    """Fixed-width distance, or n/a when undefined."""
+    return FIGURE_SPACE*3+"n/a" if not np.isfinite(value) else fixed_width(value, 6, 2)
+
+
 def speed_label(speed):
     """Video speed as mission seconds per video second, e.g. 5x or 0.5x."""
     return f"{speed:g}x"
 
 
-def title_text(scenario, controller, n, speed, t, solve_label, separation, colliding):
+def title_text(scenario, map_size, controller, n, speed, t, solve_label, separation,
+               clearance):
     """Two-line replay header; values are bold and numbers keep a fixed width."""
-    gap = (FIGURE_SPACE*3+"n/a" if not np.isfinite(separation)
-           else fixed_width(separation, 6, 2))
-    return (f"Scenario: {bold(scenario)} · Algorithm: {bold(controller)} · "
+    return (f"Scenario: {bold(scenario)} · Map size: {bold(map_size)} · "
+            f"Algorithm: {bold(controller)} · "
             f"{bold(n)} UAVs · Video speed: {bold(speed_label(speed))} · "
             f"t = {bold(fixed_width(t, 7, 3))} s\n"
-            f"{solve_label} · Minimum UAV Separation Distance: {bold(gap)} m · "
-            f"Is UAV colliding? {bold(colliding)}")
+            f"{solve_label} · Minimum UAV Separation Distance: {bold(distance_label(separation))} m · "
+            f"Minimum UAV - Obstacles Distance: {bold(distance_label(clearance))} m")
 
 
 def render(args):
@@ -314,12 +397,10 @@ def render(args):
     events = ([json.loads(line) for line in events_path.read_text().splitlines() if line.strip()]
               if events_path.exists() else [])
     releases, solves = round_solve_times(events, float(cfg.get("compute_ratio", 1.)))
-    result_path = directory/"result.json"
-    result = json.loads(result_path.read_text()) if result_path.exists() else {}
-    # Any recorded contact (obstacle, boundary, ground or UAV-UAV) ends the run;
-    # the header reports it from the contact time onward.
-    hit_time = (result.get("collision") or {}).get("time", np.inf)
     separations = min_separations(states)
+    clearances = min_obstacle_distances(states, cfg["scenario_definition"]["rects"],
+                                        cfg["scenario_definition"]["circles"])
+    map_size = map_size_label(cfg["params"]["WORLD_BOUNDS"])
     speed = float(getattr(args, "speed", 1.))
     output = Path(args.out or directory/"replay.png")
     if output.suffix.lower() not in (".png",".mp4"):
@@ -346,9 +427,9 @@ def render(args):
     ax.set_axis_off()
     # Figure overlays do not reserve space or shrink the scenery viewport.
     title_top = .988
-    title = fig.text(.5, title_top, title_text(cfg["scenario"], cfg["controller"],
+    title = fig.text(.5, title_top, title_text(cfg["scenario"], map_size, cfg["controller"],
                                                states.shape[1], speed, 0., solve_time_label(
-                                                   releases, solves, 0.), 0., False),
+                                                   releases, solves, 0.), 0., 0.),
                      ha="center", va="top", fontsize=11, color="#111111", zorder=11)
     # Size the white band to the two lines: equal padding above and below.
     extent = title.get_window_extent(fig.canvas.get_renderer())
@@ -384,13 +465,12 @@ def render(args):
             follow_camera(ax, targets[index], (xmin,ymin,xmax,ymax), max_z, zoom)
         projection = ax.get_proj()
         stride = max(1,index//1000)
-        blocked = occluders(projection, s[:,:3], boxes)
-        keys = {frozenset(np.flatnonzero(row).tolist()) for row in blocked}
+        keys = set()
         for i in range(n):
             # Keep the newest sample so the trail reaches the aircraft.
             keys |= trails[i].update(np.r_[states[:index:stride,i,:3], s[None,i,:3]],
                                      projection, boxes)
-            aircraft[i].update(s[i,:3], s[i,6:10])
+            keys |= aircraft[i].update(s[i,:3], s[i,6:10], projection, boxes)
             keys |= footprints[i].update(square+np.r_[s[i,:2],.05], projection, boxes)
         keys |= target_line.update(np.r_[targets[:index:stride], targets[None,index]],
                                    projection, boxes)
@@ -398,14 +478,11 @@ def render(args):
         # Raise only obstacles that hide an overlay, interleaved by depth.
         plan = LayerPlan(projection, boxes, keys)
         city.set_layers(plan.obstacle_layers)
-        for i in range(n):
-            key = frozenset(np.flatnonzero(blocked[i]).tolist())
-            aircraft[i].set_layer(*(plan.layer(key) if key else (0., 1.)))
-        for line in (*trails, *footprints, target_line, target_marker):
-            line.place(plan)
-        title.set_text(title_text(cfg["scenario"], cfg["controller"], n, speed, times[index],
-                                  solve_time_label(releases, solves, times[index]),
-                                  separations[index], bool(times[index] >= hit_time)))
+        for part in (*trails, *footprints, target_line, target_marker, *aircraft):
+            part.place(plan)
+        title.set_text(title_text(cfg["scenario"], map_size, cfg["controller"], n, speed,
+                                  times[index], solve_time_label(releases, solves, times[index]),
+                                  separations[index], clearances[index]))
         return []
     if output.suffix.lower()==".png":
         update(times[-1] if args.time is None else args.time)
