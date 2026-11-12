@@ -150,11 +150,43 @@ def round_solve_times(events, ratio):
     return np.array([r for r, _ in ordered]), np.array([d for _, d in ordered])
 
 
+def bold(text):
+    """Bold a value inside an otherwise regular title line (mathtext, DejaVu Sans Bold)."""
+    return "$\\mathbf{" + str(text).replace("_", "\\_").replace(" ", "\\ ") + "}$"
+
+
 def solve_time_label(releases, solves, t):
     """Max solve time of the latest round released at or before mission time t."""
     index = np.searchsorted(releases, t+1e-12, side="right")-1
     value = fixed_width(solves[index]*1e3, 6, 1) if index >= 0 else FIGURE_SPACE*3+"n/a"
-    return f"Max solve time d = {value} ms"
+    return f"Max solve time d = {bold(value)} ms"
+
+
+def min_separations(states):
+    """Smallest 3D centre distance between any two UAVs, per recorded sample."""
+    positions = np.asarray(states, dtype=float)[..., :3]
+    if positions.shape[1] < 2:
+        return np.full(len(positions), np.nan)
+    gaps = positions[:, :, None] - positions[:, None, :]
+    distance = np.linalg.norm(gaps, axis=-1)
+    distance[:, np.arange(positions.shape[1]), np.arange(positions.shape[1])] = np.inf
+    return distance.min(axis=(1, 2))
+
+
+def speed_label(speed):
+    """Video speed as mission seconds per video second, e.g. 5x or 0.5x."""
+    return f"{speed:g}x"
+
+
+def title_text(scenario, controller, n, speed, t, solve_label, separation, colliding):
+    """Two-line replay header; values are bold and numbers keep a fixed width."""
+    gap = (FIGURE_SPACE*3+"n/a" if not np.isfinite(separation)
+           else fixed_width(separation, 6, 2))
+    return (f"Scenario: {bold(scenario)} · Algorithm: {bold(controller)} · "
+            f"{bold(n)} UAVs · Video speed: {bold(speed_label(speed))} · "
+            f"t = {bold(fixed_width(t, 7, 3))} s\n"
+            f"{solve_label} · Minimum UAV Separation Distance: {bold(gap)} m · "
+            f"Is UAV colliding? {bold(colliding)}")
 
 
 def render(args):
@@ -174,6 +206,13 @@ def render(args):
     events = ([json.loads(line) for line in events_path.read_text().splitlines() if line.strip()]
               if events_path.exists() else [])
     releases, solves = round_solve_times(events, float(cfg.get("compute_ratio", 1.)))
+    result_path = directory/"result.json"
+    result = json.loads(result_path.read_text()) if result_path.exists() else {}
+    # Any recorded contact (obstacle, boundary, ground or UAV-UAV) ends the run;
+    # the header reports it from the contact time onward.
+    hit_time = (result.get("collision") or {}).get("time", np.inf)
+    separations = min_separations(states)
+    speed = float(getattr(args, "speed", 1.))
     output = Path(args.out or directory/"replay.png")
     if output.suffix.lower() not in (".png",".mp4"):
         raise ValueError("Replay output must end in .png or .mp4")
@@ -198,10 +237,16 @@ def render(args):
         ax.set_proj_type("ortho")
     ax.set_axis_off()
     # Figure overlays do not reserve space or shrink the scenery viewport.
-    fig.add_artist(Rectangle((0, .925), 1, .075, transform=fig.transFigure,
+    title_top = .988
+    title = fig.text(.5, title_top, title_text(cfg["scenario"], cfg["controller"],
+                                               states.shape[1], speed, 0., solve_time_label(
+                                                   releases, solves, 0.), 0., False),
+                     ha="center", va="top", fontsize=11, color="#111111", zorder=11)
+    # Size the white band to the two lines: equal padding above and below.
+    extent = title.get_window_extent(fig.canvas.get_renderer())
+    band = 1 - (extent.y0/fig.bbox.height - (1-title_top))
+    fig.add_artist(Rectangle((0, 1-band), 1, band, transform=fig.transFigure,
                              facecolor="white", edgecolor="none", zorder=10))
-    title = fig.text(.5, .988, "", ha="center", va="top", fontsize=11,
-                     color="#111111", zorder=11)
     height = max(5.,float(states[:,:,2].max())*1.3)
     draw_city(ax, (xmin,ymin,xmax,ymax), cfg["scenario_definition"]["rects"],
               cfg["scenario_definition"]["circles"], height)
@@ -214,14 +259,14 @@ def render(args):
     half = cfg["params"]["VIEWING_RADIUS"]
     trails,aircraft,footprints = [],[],[]
     for i in range(n):
-        trails.append(DepthSplitLine(ax,color=colors[i],lw=1.5,label=f"UAV {i}"))
+        trails.append(DepthSplitLine(ax,color=colors[i],lw=1.5,label=f"UAV {i+1}"))
         aircraft.append(QuadcopterGlyph(ax, colors[i], glyph))
         # Long square edges are split so an obstacle can hide part of one.
         footprints.append(DepthSplitLine(ax,segment=half/8,color=colors[i],lw=.8,alpha=.6))
     target_line = DepthSplitLine(ax,color="#f1f5f9",ls="--",lw=1)
     target_marker = DepthSplitLine(ax,marker="*",color="#dc2626",ms=12,ls="none")
     ax.legend(handles=[trail.front for trail in trails],
-              loc="upper left", bbox_to_anchor=(.008, .915), fontsize=8)
+              loc="upper left", bbox_to_anchor=(.008, 1-band-.01), fontsize=8)
     square = np.array([[-half,-half,0],[half,-half,0],[half,half,0],[-half,half,0],[-half,-half,0]])
     def update(t):
         index = max(0,min(len(times)-1,np.searchsorted(times,t,side="right")-1))
@@ -242,9 +287,9 @@ def render(args):
         target_line.update(np.r_[targets[:index:stride], targets[None,index]],
                            projection, boxes)
         target_marker.update(targets[index,None,:], projection, boxes)
-        title.set_text(f"{cfg['scenario']} · {cfg['controller']} · {n} UAVs · "
-                       f"t = {fixed_width(times[index], 7, 3)} s\n"
-                       f"{solve_time_label(releases, solves, times[index])}")
+        title.set_text(title_text(cfg["scenario"], cfg["controller"], n, speed, times[index],
+                                  solve_time_label(releases, solves, times[index]),
+                                  separations[index], bool(times[index] >= hit_time)))
         return []
     if output.suffix.lower()==".png":
         update(times[-1] if args.time is None else args.time)

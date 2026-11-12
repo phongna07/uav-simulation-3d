@@ -252,12 +252,20 @@ world axis limits, ground paving, and obstacle coordinates stay fixed. `--zoom` 
 and `--camera overview` restores the full-map view. Camera tracking does not
 change the trajectory or simulation.
 The scenery viewport fills the entire output frame without stretching the map;
-the title sits on an opaque white overlay at the top and the UAV legend sits
-below it. The title's second line shows the max solve time
+the title sits on an opaque white overlay, sized to give the two lines equal
+top and bottom padding, and the UAV legend (UAVs numbered from 1) sits below it.
+The first line reads `Scenario: … · Algorithm: … · N UAVs · Video speed: Sx ·
+t = … s`, where the video speed is `--speed` (mission seconds per video second).
+The second line shows the max solve time
 `d = max_i C_i` of the latest planning round released at or before the frame
 time, read from `events.jsonl`. `C_i` is the raw host duration (the injected
 delay divided by `--compute-ratio`, or the measured duration when the ratio is
-0), so `d` does not depend on the ratio. Mission time and `d` use fixed-width,
+0), so `d` does not depend on the ratio. It continues with the minimum UAV
+separation distance (smallest 3D centre-to-centre distance between any two
+UAVs in that frame, as in the `min_inter_uav_m` metric) and `Is UAV colliding?`,
+which turns `True` from the contact time recorded in `result.json` (any obstacle,
+boundary, ground or UAV-UAV contact; such a contact ends the run). Values are
+bold. Mission time, `d` and the separation use fixed-width,
 digit-wide padding so the centered title does not shift between frames. World axes and their labels are hidden for a clean video frame.
 MP4 export uses an environment-managed FFmpeg binary. Replay uses dark gray
 running-bond brick paving and buildings on rectangular obstacle footprints
