@@ -97,3 +97,28 @@ def test_follow_preserves_scenery_geometry_across_frames():
             np.testing.assert_allclose(projected[:2], (0, 0), atol=1e-12)
     finally:
         plt.close(fig)
+
+
+def test_follow_lift_centers_flight_altitude_and_keeps_zoom():
+    fig = plt.figure()
+    ax = fig.add_subplot(axes_class=TargetFollowAxes)
+    ax.view_init(elev=55, azim=-65)
+    ax.set_proj_type("ortho")
+    try:
+        target = np.array([400., 600., 0.])
+        _, plain = follow_camera(ax, target, (0, 0, 1000, 1000), 50, 3)
+        step = np.subtract(proj3d.proj_transform(*(target+(10, 0, 0)), ax.get_proj())[:2],
+                           proj3d.proj_transform(*target, ax.get_proj())[:2])
+        _, lifted = follow_camera(ax, target, (0, 0, 1000, 1000), 50, 3, lift=30)
+        proj = ax.get_proj()
+        np.testing.assert_allclose(proj3d.proj_transform(*(target+(0, 0, 30)), proj)[:2],
+                                   (0, 0), atol=1e-12)
+        # Target sits straight below the frame center.
+        x, y, _ = proj3d.proj_transform(*target, proj)
+        assert x == pytest.approx(0, abs=1e-12) and y < 0
+        # Same magnification and nominal window: only the pan moved.
+        np.testing.assert_allclose(
+            np.subtract(proj3d.proj_transform(*(target+(10, 0, 0)), proj)[:2], (x, y)), step)
+        assert lifted == plain
+    finally:
+        plt.close(fig)

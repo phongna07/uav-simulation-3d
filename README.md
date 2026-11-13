@@ -294,8 +294,11 @@ and are enlarged for field-scale visibility; the vertical display aspect is also
 exaggerated when needed. Aircraft
 positions, target, footprints, and obstacles use their recorded coordinates.
 The default camera follows the recorded target at 6× magnification with a
-55-degree downward view and fixed heading. The target stays centered even near
-map edges; distant drones may leave the frame. Tracking pans the camera projection;
+55-degree downward view and fixed heading. The camera aims at the point above
+the target at the recorded flying altitude (median aircraft altitude), so the
+swarm hovering over the target sits at the frame center and the target appears
+below it by the projected altitude; this holds even near map edges, and distant
+drones may leave the frame. Tracking pans the camera projection;
 world axis limits, ground paving, and obstacle coordinates stay fixed. `--zoom` adjusts magnification,
 and `--camera overview` restores the full-map view. Camera tracking does not
 change the trajectory or simulation.

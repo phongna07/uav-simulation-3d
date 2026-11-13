@@ -34,8 +34,13 @@ class TargetFollowAxes(Axes3D):
         return projection
 
 
-def follow_camera(ax, target, bounds, max_z, zoom):
+def follow_camera(ax, target, bounds, max_z, zoom, lift=0.):
     """Move the camera to the target, keeping world bounds and heading fixed.
+
+    ``lift`` aims the camera at the point ``lift`` metres above the target
+    instead of the target itself, so aircraft flying at that altitude over the
+    target sit at the frame center and the target appears below it. Zoom and
+    heading are unchanged; only the screen-plane pan moves.
 
     Returns the vertical display scale and the nominal horizontal view window.
     Scenery stays in world coordinates and must not be rebuilt from this window.
@@ -49,6 +54,7 @@ def follow_camera(ax, target, bounds, max_z, zoom):
     ax.set_box_aspect((xmax-xmin, ymax-ymin, display_z))
     ax.set_zticks(np.linspace(0, max_z, 3))
     ax.camera_target = np.asarray(target, dtype=float).copy()
+    ax.camera_target[2] += lift
     ax.camera_zoom = zoom
     x, y = target[:2]
     return scale, (x-span/2, y-span/2, x+span/2, y+span/2)
@@ -443,6 +449,10 @@ def build_scene(args):
     ax.view_init(elev=35,azim=-65)
     following = getattr(args, "camera", "follow") == "follow"
     zoom = getattr(args, "zoom", 6.)
+    # Center the swarm rather than the ground target: aim at the target lifted
+    # to the recorded flying altitude. The aircraft hold altitude, so a single
+    # robust value keeps the pan smooth (no per-frame vertical jitter).
+    flight_altitude = float(np.clip(np.median(states[:,:,2]), 0., max_z))
     if following:
         ax.view_init(elev=55, azim=-65)
         ax.set_proj_type("ortho")
@@ -484,7 +494,8 @@ def build_scene(args):
         s = states[index]
         # Set the camera first: occlusion is tested against this frame's view.
         if following:
-            follow_camera(ax, targets[index], (xmin,ymin,xmax,ymax), max_z, zoom)
+            follow_camera(ax, targets[index], (xmin,ymin,xmax,ymax), max_z, zoom,
+                          flight_altitude)
         projection = ax.get_proj()
         stride = max(1,index//1000)
         keys = set()
