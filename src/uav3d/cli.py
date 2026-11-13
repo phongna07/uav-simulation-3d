@@ -60,6 +60,11 @@ def parser():
                    help="follow the target (default) or show the full map")
     q.add_argument("--zoom",type=float,default=6.,
                    help="follow camera magnification relative to the full map (default: 6)")
+    q.add_argument("--trail-fade",type=float,default=60.,metavar="SECONDS",
+                   help="trail opacity time constant in mission seconds; older trail "
+                        "fades toward --trail-min-alpha (default: 60; 0 = no fading)")
+    q.add_argument("--trail-min-alpha",type=float,default=.2,
+                   help="opacity factor of the oldest trail, in [0, 1] (default: 0.2)")
     env = os.environ.get
     q.add_argument("--jobs",default=env("UAV3D_REPLAY_JOBS","auto"),
                    help="MP4 render worker processes: 'auto' (default; sized from available "
@@ -178,6 +183,8 @@ def main(argv=None):
         import math
         if args.fps<=0 or args.speed<=0:
             p.error("--fps and --speed must be positive")
+        if args.trail_fade<0 or not 0<=args.trail_min_alpha<=1:
+            p.error("--trail-fade must be >= 0 and --trail-min-alpha in [0, 1]")
         if not math.isfinite(args.zoom) or args.zoom<=0:
             p.error("--zoom must be finite and positive")
         from .video import plan_export

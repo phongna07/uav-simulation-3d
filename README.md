@@ -327,7 +327,13 @@ circular obstacle footprints. MP4s render at three times the output resolution
 then downsample to 1920 × 1280, smoothing fine window edges during camera pans.
 The paving extends one world span beyond every map edge, including negative X and Y, to keep ground
 visible around the origin and during camera tracking. Pavers are enlarged to
-remain visible at map scale. This decoration only affects replay: collision and
+remain visible at map scale. Aircraft trails fade with age: each segment's
+opacity is `min + (1 - min)·exp(-age/τ)`, so the trail is fully opaque at the
+aircraft and eases toward a faint but never invisible floor. `--trail-fade τ`
+sets the time constant in mission seconds (default 60; `0` disables fading) and
+`--trail-min-alpha` the floor (default 0.2). Fading is computed from recorded
+mission time, so it is identical across `--speed` values and parallel workers.
+This decoration only affects replay: collision and
 LiDAR still use the original vertical obstacle columns, including the space
 around tree trunks and above the decorative roofs/crowns. High-quality artistic
 rendering and a live viewer are outside v1. Aircraft glyphs, trails, FOV

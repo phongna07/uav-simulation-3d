@@ -201,3 +201,23 @@ def test_front_obstacles_include_nearer_overlapping_boxes():
     assert [indices for _, indices in plan.obstacle_layers] == [[0, 1]]
     assert plan.layer({0})[0] < plan.obstacle_layers[0][0]
     plt.close(fig)
+
+
+def test_trail_fades_with_age_but_never_vanishes():
+    from uav3d.replay import FadingTrail, trail_fade
+    fade = trail_fade([0., 60., 1e6], 60., .2)
+    assert fade[0] == pytest.approx(1.) and fade[0] > fade[1] > fade[2] == pytest.approx(.2)
+    assert np.all(trail_fade([0., 500.], 0., .2) == 1.)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig = plt.figure()
+    ax = fig.add_subplot(projection="3d", computed_zorder=False)
+    trail = FadingTrail(ax, "red", lw=2, label="UAV 1")
+    points = np.c_[np.linspace(0, 10, 5), np.zeros((5, 2)), [.2, .4, .6, .8, 1.]]
+    trail.update(points, ax.get_proj(), np.empty((0, 2, 3)))
+    alpha = trail.front.get_colors()[:, 3]
+    assert len(alpha) == 4 and np.all(np.diff(alpha) > 0) and alpha.min() > 0
+    assert trail.handle.get_label() == "UAV 1"
+    plt.close(fig)
