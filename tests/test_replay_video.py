@@ -142,3 +142,26 @@ def test_failed_worker_leaves_no_output(tmp_path):
     with pytest.raises(RuntimeError, match="worker"):
         main(["replay", str(run), "--out", str(out), "--fps", "4", "--jobs", "2"])
     assert not out.exists() and not list(tmp_path.glob(".*partial*"))
+
+
+def test_worker_estimate_counts_the_private_scaler():
+    # Measured peak per worker at 5760x3840: ~0.87 GiB Python + ~1.2 GiB scaling ffmpeg.
+    assert video.worker_memory(4) >= 2*GiB
+    # 44 GiB available on a 48-CPU host must not start the 44 workers (~90 GiB)
+    # that OOM-killed full-length exports.
+    plan = video.plan_export(10_000, cpus=48, memory=44*GiB)
+    assert plan.jobs*video.worker_memory(4) + video.ENCODER_BYTES <= 44*GiB*video.MEMORY_FRACTION
+    assert plan.jobs < 44
+
+
+def test_dead_encoder_fails_fast_instead_of_hanging(tmp_path, monkeypatch):
+    import sys
+    run = make_run(tmp_path/"run")
+    out = tmp_path/"dead.mp4"
+    # Stands in for an OOM-killed x264 encoder: reads a little, then exits.
+    monkeypatch.setattr(video, "encoder_command", lambda *a, **k: [
+        sys.executable, "-c", "import sys; sys.stdin.buffer.read(1000); sys.exit(3)"])
+    with pytest.raises(RuntimeError, match="encoder exited"):
+        main(["replay", str(run), "--out", str(out), "--fps", "4", "--zoom", "2",
+              "--jobs", "2", "--queue-frames", "1"])
+    assert not out.exists() and not list(tmp_path.glob(".*partial*"))

@@ -365,9 +365,14 @@ byte-identical to `--jobs 1` (checked in `tests/test_replay_video.py`).
 | `--encoder-threads auto\|N` | `UAV3D_REPLAY_ENCODER_THREADS` | x264 threads (default: ffmpeg's choice); a different count may change the bitstream slightly, not the quality target |
 
 CPU count follows the process affinity mask and any cgroup CPU quota. Each
-worker needs about 0.7 GiB at the 5760 × 3840 render size, and the encoder about
-3.5 GiB. An explicit `--jobs` above the CPU count or the memory budget is
-honoured with a warning. Before rendering, replay warns if the output
+worker needs about 2.1 GiB at the 5760 × 3840 render size: ~0.9 GiB for the
+drawing process and ~1.2 GiB for its private scaling ffmpeg, which queues
+several raw frames between its threads. The encoder needs about 3.5 GiB. On a
+48-CPU, 47 GiB host this means `auto` picks ~14 workers rather than 44. An
+explicit `--jobs` above the CPU count or the memory budget is honoured with a
+warning. If the encoder dies mid-export (for example, killed by the kernel when
+memory runs out), the export stops at once with an error, stops its workers,
+and leaves no partial MP4 behind. Before rendering, replay warns if the output
 filesystem has less than twice the estimated video size free (~40 kB per frame).
 Progress (frame, frames/s, remaining time) is printed to stderr every
 `--progress-interval` seconds (default 10; see [Console progress](#console-progress)).

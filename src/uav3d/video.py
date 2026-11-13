@@ -37,11 +37,19 @@ FIGSIZE = (12, 8)  # must match replay.build_scene
 WORKER_CORES = 1.0  # throughput peaked at CPUs - 4 workers (48 cores: 44)
 ENCODER_CORES = 4
 WORKER_BASE_BYTES = 450 * 2**20
-WORKER_RENDER_COPIES = 3          # Agg buffer + savefig stream + scaler input
+# Render-size RGBA frames (84 MiB each at 5760x3840) resident per worker, measured
+# as peak RSS during full scen1-scen4 exports. The Python process held ~0.87 GiB
+# (Agg buffer, savefig stream, pipe writes). The worker's private scaling ffmpeg
+# held ~1.2 GiB: its demux/filter/output threads each queue raw input frames,
+# and -thread_queue_size does not bound that. Leaving the scaler out made "auto"
+# start 44 workers (~90 GiB) on a 47 GiB host, which the kernel OOM-killed.
+WORKER_RENDER_COPIES = 5
+SCALER_RENDER_COPIES = 15
 ENCODER_BYTES = 3584 * 2**20  # x264 lookahead/threads plus parent buffers (measured)
 MEMORY_FRACTION = .8              # share of available memory used by "auto"
 BYTES_PER_FRAME_ESTIMATE = 40_000  # ~31 kB/frame observed for scen1 at CRF 18
 MIN_FRAMES_PER_WORKER = 8  # "auto" avoids spawning workers that would barely draw
+WORKER_EXIT_TIMEOUT_S = 60  # after "done", a worker only flushes its queue and exits
 
 
 def ffmpeg_exe():
@@ -119,7 +127,8 @@ def available_memory():
 def worker_memory(queue_frames):
     width, height = render_size()
     out_w, out_h = output_size()
-    return (WORKER_BASE_BYTES + WORKER_RENDER_COPIES*width*height*4
+    return (WORKER_BASE_BYTES
+            + (WORKER_RENDER_COPIES + SCALER_RENDER_COPIES)*width*height*4
             + (queue_frames+2)*out_w*out_h*3//2)
 
 
@@ -406,6 +415,7 @@ def export_parallel(args, output, frames, plan):
             _log(f"started {jobs} render workers; each builds its scene before the first frame")
             start = time.monotonic()
             ticker = None
+            encoder_gone = False
             for i in range(len(frames)):
                 k = i % jobs
                 kind, data = _next(queues[k], workers[k], k)
@@ -415,27 +425,40 @@ def export_parallel(args, output, frames, plan):
                 try:
                     encoder.stdin.write(data)
                 except BrokenPipeError:
-                    break  # reported below from the encoder's exit status
+                    # Workers still hold undelivered frames; draining or joining
+                    # them would block forever. Fail now and let `finally` stop them.
+                    encoder_gone = True
+                    break
                 if ticker is None:
                     # Rate and ETA count from the first frame, after worker start-up.
                     _log(f"first frame after {progress.duration(time.monotonic()-start)}")
                     ticker = progress.Ticker(_interval(args))
                 else:
                     _frame_progress(i+1, len(frames), ticker, before=1)
-            for k, worker in enumerate(workers):
-                kind, data = _next(queues[k], worker, k)
-                if kind == "error":
-                    raise RuntimeError(f"replay worker {k} failed:\n{data}")
-                worker.join()
+            if not encoder_gone:
+                for k, worker in enumerate(workers):
+                    kind, data = _next(queues[k], worker, k)
+                    if kind == "error":
+                        raise RuntimeError(f"replay worker {k} failed:\n{data}")
+                    if kind != "done":
+                        raise RuntimeError(f"replay worker {k} sent more frames than assigned")
+                    worker.join(timeout=WORKER_EXIT_TIMEOUT_S)
+                    if worker.is_alive():
+                        raise RuntimeError(f"replay worker {k} did not exit after its last frame")
             try:
                 encoder.stdin.close()
             except BrokenPipeError:
                 pass
             encoder.wait()
-            if encoder.returncode:
+            if encoder.returncode or encoder_gone:
                 errors.seek(0)
-                raise RuntimeError("ffmpeg encoder failed:\n"
-                                   + errors.read().decode(errors="replace"))
+                detail = errors.read().decode(errors="replace").strip()
+                raise RuntimeError(f"ffmpeg encoder exited (code {encoder.returncode}) "
+                                   f"before receiving all frames"
+                                   + (" (code -9 usually means the kernel OOM killer; "
+                                      "try a smaller --jobs or --max-memory)"
+                                      if encoder.returncode == -9 else "")
+                                   + (f":\n{detail}" if detail else ""))
             _log(f"encoded {len(frames)} frames in "
                  f"{progress.duration(time.monotonic()-start)}")
         finally:
