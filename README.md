@@ -68,6 +68,36 @@ The fleet size is not a CLI option: it is inferred from the scenario's
 `starts` list (upstream sets `NUM_ROBOT = len(starts)`), so a different fleet
 needs a scenario with a different `starts` list.
 
+### Console progress
+
+`run`, `benchmark`, `metrics` and `replay` write timestamped progress lines to
+stderr (`HH:MM:SS [run ours] ...`); results stay on stdout (the final run line,
+the metrics JSON, the replay path), so `uav3d metrics DIR > m.json` still
+captures clean JSON. Lines never use carriage returns, so a redirected log file
+(`... > /tmp/name.log 2>&1`) reads the same as the terminal.
+
+- **run**: setup stages (scenario load, fleet size, horizon, physics workers,
+  planner warm-up time), each UAV's first switch to target tracking, then a
+  periodic status line: mission time and percentage, planning round, wall time,
+  mission-to-wall speed and ETA, round solve time (mean/max of the slowest UAV
+  per round since the last line), UAVs tracking, UAVs in watchdog braking,
+  rejected stale plans, upstream stop fallbacks and skipped releases. A
+  collision, interruption or error is reported as it ends the mission, followed
+  by artifact writing and a one-line metrics digest.
+- **benchmark**: `[k/N] controller` before and after each child run, with its
+  termination, wall time and remaining-time estimate, and a final summary.
+- **metrics**: sample and planner-call counts, progress through the
+  visibility/coverage pass (about 10 s for a full mission), and a digest.
+- **replay**: scene building and drawing stages for PNG; frame count, worker
+  plan, time to first frame, and frame/rate/ETA lines for serial and parallel
+  MP4 export.
+
+`--progress-interval SECONDS` (env `UAV3D_PROGRESS_INTERVAL`, default 10) sets
+the wall-time spacing of the periodic lines; `0` keeps only stage and event
+lines. Status lines are produced between planning rounds, outside every timed
+planner call, so they never count as planning delay and do not change any
+trajectory (only `wall_time_s`/`throughput` include their negligible cost).
+
 ## Timing semantics
 
 Scheduling is always **parallel**: one planning worker per UAV (there is no
@@ -339,7 +369,8 @@ worker needs about 0.7 GiB at the 5760 × 3840 render size, and the encoder abou
 3.5 GiB. An explicit `--jobs` above the CPU count or the memory budget is
 honoured with a warning. Before rendering, replay warns if the output
 filesystem has less than twice the estimated video size free (~40 kB per frame).
-Progress (frame, frames/s, remaining time) is printed to stderr every 15 s.
+Progress (frame, frames/s, remaining time) is printed to stderr every
+`--progress-interval` seconds (default 10; see [Console progress](#console-progress)).
 
 ```bash
 uv run uav3d replay runs/ours-demo --out exports/ours.mp4 --speed 5 --fps 24            # auto

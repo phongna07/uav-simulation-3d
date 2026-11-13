@@ -18,12 +18,12 @@ from pathlib import Path
 import queue as queue_module
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 import traceback
 from types import SimpleNamespace
+from . import progress
 
 SUPERSAMPLE = 3
 RENDER_DPI = 480
@@ -41,7 +41,6 @@ WORKER_RENDER_COPIES = 3          # Agg buffer + savefig stream + scaler input
 ENCODER_BYTES = 3584 * 2**20  # x264 lookahead/threads plus parent buffers (measured)
 MEMORY_FRACTION = .8              # share of available memory used by "auto"
 BYTES_PER_FRAME_ESTIMATE = 40_000  # ~31 kB/frame observed for scen1 at CRF 18
-PROGRESS_INTERVAL_S = 15.
 MIN_FRAMES_PER_WORKER = 8  # "auto" avoids spawning workers that would barely draw
 
 
@@ -206,7 +205,24 @@ def check_disk(path, frames):
 # --- export ---------------------------------------------------------------
 
 def _log(message):
-    print(f"[replay] {message}", file=sys.stderr, flush=True)
+    progress.log("replay", message)
+
+
+def _interval(args):
+    return float(getattr(args, "progress_interval", progress.DEFAULT_INTERVAL_S))
+
+
+def _frame_progress(done, total, ticker, before=0):
+    """Log 'frame i/N' with rate and remaining time when the ticker is due.
+
+    The ticker started after `before` frames had already been delivered."""
+    if not ticker.due():
+        return
+    elapsed = ticker.elapsed()
+    rate = (done-before)/elapsed if elapsed > 0 else 0.
+    _log(f"frame {done}/{total} ({100*done/total:.0f}%), {rate:.1f} frames/s, "
+         f"elapsed {progress.duration(elapsed)}, "
+         f"ETA {progress.duration(progress.eta(done-before, total-before, elapsed))}")
 
 
 def _partial_path(output):
@@ -223,6 +239,9 @@ def export(args, output):
                        getattr(args, "max_memory", "auto"),
                        getattr(args, "queue_frames", 4),
                        getattr(args, "encoder_threads", "auto"))
+    _log(f"{len(frames)} frames at {args.fps} fps, {args.speed:g}x speed "
+         f"({times[-1]:.2f}s of mission, {len(frames)/args.fps:.1f}s of video), "
+         f"{getattr(args, 'camera', 'follow')} camera")
     for note in plan.notes:
         _log(note)
     disk = check_disk(output.parent, len(frames))
@@ -256,6 +275,10 @@ def export_serial(args, output, frames, encoder_threads=None):
     fig, update, _ = build_scene(args)
     matplotlib.rcParams["animation.ffmpeg_path"] = ffmpeg_exe()
     animation = FuncAnimation(fig, update, frames=frames, interval=1000/args.fps, blit=False)
+    start = time.monotonic()
+    ticker = progress.Ticker(_interval(args))
+    def report(done, total):
+        _frame_progress(done+1, total, ticker)
     # Supersample smoothed mesh faces, then filter to the delivery resolution.
     # Direct rasterization makes subpixel window mullions jump between pixel
     # columns during camera pans. Matching edge strokes seal facade tiles;
@@ -263,8 +286,10 @@ def export_serial(args, output, frames, encoder_threads=None):
     animation.save(output, dpi=RENDER_DPI,
                    writer=FFMpegWriter(fps=args.fps, codec="libx264",
                                        extra_args=["-vf", SCALE_FILTER, *ENCODE_ARGS,
-                                                   *_encoder_threads_args(encoder_threads)]))
+                                                   *_encoder_threads_args(encoder_threads)]),
+                   progress_callback=report)
     plt.close(fig)
+    _log(f"encoded {len(frames)} frames in {progress.duration(time.monotonic()-start)}")
 
 
 def _scene_spec(args):
@@ -378,7 +403,9 @@ def export_parallel(args, output, frames, plan):
         try:
             for worker in workers:
                 worker.start()
-            start = last = time.monotonic()
+            _log(f"started {jobs} render workers; each builds its scene before the first frame")
+            start = time.monotonic()
+            ticker = None
             for i in range(len(frames)):
                 k = i % jobs
                 kind, data = _next(queues[k], workers[k], k)
@@ -389,12 +416,12 @@ def export_parallel(args, output, frames, plan):
                     encoder.stdin.write(data)
                 except BrokenPipeError:
                     break  # reported below from the encoder's exit status
-                now = time.monotonic()
-                if now - last >= PROGRESS_INTERVAL_S:
-                    last = now
-                    rate = (i+1)/(now-start)
-                    _log(f"frame {i+1}/{len(frames)} ({100*(i+1)/len(frames):.0f}%), "
-                         f"{rate:.1f} frames/s, ~{(len(frames)-i-1)/rate:.0f} s left")
+                if ticker is None:
+                    # Rate and ETA count from the first frame, after worker start-up.
+                    _log(f"first frame after {progress.duration(time.monotonic()-start)}")
+                    ticker = progress.Ticker(_interval(args))
+                else:
+                    _frame_progress(i+1, len(frames), ticker, before=1)
             for k, worker in enumerate(workers):
                 kind, data = _next(queues[k], worker, k)
                 if kind == "error":
@@ -409,7 +436,8 @@ def export_parallel(args, output, frames, plan):
                 errors.seek(0)
                 raise RuntimeError("ffmpeg encoder failed:\n"
                                    + errors.read().decode(errors="replace"))
-            _log(f"encoded {len(frames)} frames in {time.monotonic()-start:.0f} s")
+            _log(f"encoded {len(frames)} frames in "
+                 f"{progress.duration(time.monotonic()-start)}")
         finally:
             for worker in workers:
                 if worker.is_alive():

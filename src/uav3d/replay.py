@@ -1,8 +1,10 @@
 """Offline pose rendering using only experiment artifacts."""
 import json
 from pathlib import Path
+import time
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
+from . import progress
 
 
 class TargetFollowAxes(Axes3D):
@@ -515,11 +517,24 @@ def render(args):
     if output.suffix.lower() not in (".png",".mp4"):
         raise ValueError("Replay output must end in .png or .mp4")
     output.parent.mkdir(parents=True,exist_ok=True)
+    started = time.perf_counter()
+    try:
+        cfg = json.loads((directory/"config.json").read_text())
+        about = f" ({cfg.get('scenario','?')}, {cfg.get('controller','?')})"
+    except (OSError,ValueError):
+        about = ""  # reported by the scene builder, which needs the config
+    progress.log("replay",f"{directory}{about} -> {output}")
     if output.suffix.lower()==".png":
-        fig, update, times = build_scene(args)
-        update(times[-1] if args.time is None else args.time)
-        fig.savefig(output,dpi=180)
+        with progress.stage("replay","building scene"):
+            fig, update, times = build_scene(args)
+        t = times[-1] if args.time is None else args.time
+        with progress.stage("replay",f"drawing PNG at t={t:.2f}s"):
+            update(t)
+            fig.savefig(output,dpi=180)
         plt.close(fig)
     else:
         video.export(args, output)
+    size = output.stat().st_size
+    progress.log("replay",f"wrote {output} ({size/2**20:.1f} MiB) in "
+                          f"{progress.duration(time.perf_counter()-started)}")
     print(output)

@@ -6,7 +6,14 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from . import CONTROLLERS
+from . import CONTROLLERS, progress
+
+
+def add_progress_flag(q):
+    q.add_argument("--progress-interval",default=progress.default_interval(),
+                   help="seconds of wall time between progress lines on stderr (default: "
+                        f"{progress.DEFAULT_INTERVAL_S:g}); 0 keeps only stage and event lines "
+                        f"[env {progress.ENV_INTERVAL}]")
 
 
 def parser():
@@ -30,10 +37,12 @@ def parser():
                        help="scale every measured planning duration by r before injecting it as "
                             "mission-time delay (e.g. 0.5: onboard computer twice as fast, 1: host "
                             "speed); default 0: instantaneous planning, physics paused while solving")
+        add_progress_flag(q)
         if name=="benchmark":
             q.add_argument("--controllers",nargs="+",choices=CONTROLLERS,default=list(CONTROLLERS))
     q = sub.add_parser("metrics",help="recompute timestamp-based metrics from recorded data")
     q.add_argument("directory")
+    add_progress_flag(q)
     q = sub.add_parser("collect",help="add recorded runs to the per-preset tables in metrics/")
     q.add_argument("runs",nargs="*",help="run directories, or names under runs/ (a benchmark "
                    "directory adds each method); default: choose interactively")
@@ -65,6 +74,7 @@ def parser():
     q.add_argument("--encoder-threads",default=env("UAV3D_REPLAY_ENCODER_THREADS","auto"),
                    help="x264 threads: 'auto' (default, ffmpeg's choice) or N "
                         "[env UAV3D_REPLAY_ENCODER_THREADS]")
+    add_progress_flag(q)
     return p
 
 
@@ -72,7 +82,8 @@ def worker_command(args, controller, output):
     command = [sys.executable,"-m","uav3d.cli","_worker","--scenario",args.scenario,
                "--controller",controller,"--seed",str(args.seed),"--physics-dt",str(args.physics_dt),
                "--compute-ratio",repr(args.compute_ratio),
-               "--physics-workers",str(args.physics_workers),"--out",str(output)]
+               "--physics-workers",str(args.physics_workers),
+               "--progress-interval",repr(args.progress_interval),"--out",str(output)]
     for name in ("duration","timings_from"):
         value = getattr(args,name)
         if value is not None:
@@ -83,6 +94,11 @@ def worker_command(args, controller, output):
 def main(argv=None):
     p = parser()
     args = p.parse_args(argv)
+    if hasattr(args,"progress_interval"):
+        try:
+            args.progress_interval = progress.parse_interval(args.progress_interval)
+        except ValueError as error:
+            p.error(str(error))
     if args.command in ("run","benchmark","_worker"):
         import math
         if not math.isfinite(args.physics_dt) or args.physics_dt<=0:
@@ -111,15 +127,29 @@ def main(argv=None):
             p.error("--timings-from is supported by run, not a multi-method benchmark")
         out.mkdir(parents=True,exist_ok=False)
         summary = []
-        for controller in args.controllers:
+        total = len(args.controllers)
+        progress.log("benchmark",f"{total} controller(s) in sequence: "
+                     f"{', '.join(args.controllers)}; output {out}")
+        import time
+        started = time.monotonic()
+        for k,controller in enumerate(args.controllers,start=1):
             child = out/controller
+            progress.log("benchmark",f"[{k}/{total}] {controller} -> {child}")
+            began = time.monotonic()
             code = subprocess.call(worker_command(args,controller,child),env=env)
             record = dict(controller=controller,exit_code=code,directory=str(child))
             if (child/"metrics.json").exists():
                 record.update(json.loads((child/"metrics.json").read_text()))
             summary.append(record)
             (out/"benchmark.json").write_text(json.dumps(summary,indent=2)+"\n")
+            took = time.monotonic()-began
+            elapsed = time.monotonic()-started
+            remaining = progress.eta(k,total,elapsed) if k < total else 0.
+            progress.log("benchmark",f"[{k}/{total}] {controller}: "
+                         f"{record.get('termination','no result')} (exit {code}) in "
+                         f"{progress.duration(took)}; benchmark ETA {progress.duration(remaining)}")
             if code==130:
+                progress.log("benchmark","interrupted; remaining controllers not run")
                 return code
         import csv
         keys = sorted({key for row in summary for key in row})
@@ -127,10 +157,19 @@ def main(argv=None):
             writer = csv.DictWriter(f,fieldnames=keys)
             writer.writeheader()
             writer.writerows(summary)
+        progress.log("benchmark",f"finished in {progress.duration(time.monotonic()-started)}:")
+        for row in summary:
+            visibility = row.get("mission_visibility")
+            progress.log("benchmark",f"  {row['controller']:<12} {row.get('termination','no result'):<11} "
+                         f"visibility {'n/a' if visibility is None else f'{visibility:.1f}%'}")
+        progress.log("benchmark",f"wrote {out/'benchmark.json'} and {out/'benchmark.csv'}")
         return int(any(row["exit_code"] for row in summary))
     if args.command=="metrics":
         from .metrics import report
-        print(json.dumps(report(args.directory),indent=2))
+        from .metrics import summary as digest
+        m = report(args.directory,interval=args.progress_interval)
+        progress.log("metrics",digest(m))
+        print(json.dumps(m,indent=2))
         return 0
     if args.command=="collect":
         from .collect import main as collect

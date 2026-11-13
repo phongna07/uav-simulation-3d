@@ -12,7 +12,7 @@ import time
 import numpy as np
 from .physics import RotorPyBackend, resolve_physics_workers
 from .scheduler import next_release, parallel_events, plan_against_snapshot, scaled_delay
-from . import upstream
+from . import progress, upstream
 
 
 def jsonable(value):
@@ -108,6 +108,50 @@ class Simulation:
             self.sample()
 
 
+class MissionProgress:
+    """Console status for a running mission. It reads recorded state only and
+    runs between planning rounds, outside every timed planner call."""
+
+    def __init__(self, tag, horizon, interval, drones):
+        self.tag, self.horizon, self.drones = tag, horizon, drones
+        self.ticker = progress.Ticker(interval)
+        self.tracking = np.zeros(drones,bool)
+        self.solves = []
+
+    def log(self, message):
+        progress.log(self.tag,message)
+
+    def round(self, sim, round_index, round_records, events, skipped):
+        if round_records:
+            self.solves.append(max(r["execution_s"] for r in round_records))
+        tracking = sim.status[:,0].astype(bool)
+        for i in np.flatnonzero(tracking & ~self.tracking):
+            self.log(f"UAV {i+1} tracking the target at t={sim.t:.2f}s "
+                     f"({int(tracking.sum())}/{self.drones} tracking)")
+        self.tracking |= tracking
+        if self.ticker.due():
+            self.report(sim,round_index,events,skipped)
+
+    def report(self, sim, round_index, events, skipped):
+        wall = self.ticker.elapsed()
+        pct = 100*sim.t/self.horizon if self.horizon else 100.
+        parts = [f"t {sim.t:.2f}/{self.horizon:.2f}s ({pct:.1f}%)",f"round {round_index+1}",
+                 f"wall {progress.duration(wall)}"]
+        if wall > 0:
+            parts.append(f"{sim.t/wall:.2f}x real time, "
+                         f"ETA {progress.duration(progress.eta(sim.t,self.horizon,wall))}")
+        if self.solves:
+            parts.append(f"round solve mean {np.mean(self.solves):.3f}s max {max(self.solves):.3f}s")
+        self.solves = []
+        braking = int(sim.braking[-1].sum()) if sim.braking else 0
+        parts += [f"tracking {int(sim.status[:,0].astype(bool).sum())}/{self.drones}",
+                  f"braking {braking}",
+                  f"stale plans {sum(e.get('accepted') is False for e in events)}",
+                  f"stop fallbacks {sum(bool(e.get('upstream_stop')) and e.get('delivered',True) for e in events)}",
+                  f"skipped releases {skipped}"]
+        self.log(" | ".join(parts))
+
+
 def _git_sha(path):
     return subprocess.check_output(["git","-C",str(path),"rev-parse","HEAD"],text=True).strip()
 
@@ -128,12 +172,19 @@ def run(args):
     logging.basicConfig(filename=out/"planning.log",level=logging.WARNING,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     np.random.seed(args.seed)
+    tag = f"run {args.controller}"
+    interval = progress.parse_interval(getattr(args,"progress_interval",progress.DEFAULT_INTERVAL_S))
+    progress.log(tag,f"scenario {args.scenario}, seed {args.seed}, output {out}")
     init_start = time.perf_counter()
+    progress.log(tag,"loading upstream scenario and controller ...")
     cfg,world,starts = upstream.load(args.scenario,args.controller)
     issues = cfg.validate_config()
     for level,message in issues:
         if level != "INFO":
             logging.warning("upstream configuration %s: %s",level,message)
+    warnings = sum(level != "INFO" for level,_ in issues)
+    if warnings:
+        progress.log(tag,f"upstream configuration: {warnings} warning(s), see {out/'planning.log'}")
     errors = [message for level,message in issues if level == "ERROR"]
     if errors:
         raise ValueError("Upstream configuration errors: "+"; ".join(errors))
@@ -146,6 +197,9 @@ def run(args):
         raise ValueError("Mission duration must be positive")
     # Parallel stepping is bit-identical to serial stepping; it only uses more cores.
     physics_workers = resolve_physics_workers(getattr(args,"physics_workers","auto"),len(starts))
+    progress.log(tag,f"{len(starts)} UAVs, mission horizon {horizon:.2f}s of {full_duration:.2f}s, "
+                     f"planning period {cfg.TIMESTEP:g}s, physics dt {args.physics_dt:g}s "
+                     f"on {physics_workers} worker(s), compute ratio {args.compute_ratio:g}")
     backend = RotorPyBackend(starts,args.physics_dt,physics_workers)
     # "ours" executes its whole plan by mission time; other methods hold the latest command.
     follow_plan = cfg.CONTROLLER == "ours"
@@ -174,7 +228,10 @@ def run(args):
         # A ratio-0 source injected no delay, so its measured solve time is used instead.
         source_ratio = float(replay_config.get("compute_ratio",1.))
     ratio = args.compute_ratio
-    robots = upstream.initialize(cfg,starts,target_samples[0])
+    if timings is not None:
+        progress.log(tag,f"replaying {len(timings)} recorded planning delays from {source}")
+    with progress.stage(tag,"initializing upstream planners (warm-up)"):
+        robots = upstream.initialize(cfg,starts,target_samples[0])
     # Disposable warmup consumes RNG samples; measured experiments get a fresh stream.
     np.random.seed(args.seed)
     initialization = time.perf_counter()-init_start
@@ -208,6 +265,9 @@ def run(args):
     initial = world.first_hit(starts,starts)
     if initial:
         sim.hit = dict(time=0.,reason=initial.reason,drones=list(initial.drones))
+    monitor = MissionProgress(tag,horizon,interval,len(starts))
+    progress.log(tag,f"mission started; status every {interval:g}s of wall time"
+                 if interval > 0 else "mission started")
     release,round_index,skipped = 0.,0,0
     events,plans,plan_epochs,plan_drones = [],[],[],[]
     wall_start = time.perf_counter()
@@ -306,6 +366,7 @@ def run(args):
             for event,(measured,_),robot in zip(round_events,timed,robots):
                 deliver(replace(event,execution_s=measured),robot)
             sim.sample()
+            monitor.round(sim,round_index,events[-len(round_events):],events,skipped)
             if sim.hit is not None or sim.t >= horizon-1e-12:
                 break
             release,missed = next_release(sim.t,release,cfg.TIMESTEP)
@@ -321,6 +382,15 @@ def run(args):
         raise
     finally:
         wall = time.perf_counter()-wall_start
+        if interrupted:
+            progress.log(tag,f"interrupted at t={sim.t:.2f}s; saving the partial run")
+        elif failure:
+            progress.log(tag,f"failed at t={sim.t:.2f}s: {failure}")
+        if sim.hit:
+            drones = ", ".join(f"UAV {d+1}" for d in sim.hit["drones"]) or "no UAV"
+            progress.log(tag,f"collision at t={sim.hit['time']:.3f}s: {sim.hit['reason']} ({drones})")
+        progress.log(tag,f"mission loop ended at t={sim.t:.2f}s after {progress.duration(wall)}; "
+                         f"writing trajectory ({len(sim.times)} samples) and plans ...")
         backend.close()
         np.savez_compressed(out/"trajectory.npz",time=np.array(sim.times),
                             aircraft=np.array(sim.aircraft),target=np.array(sim.targets),
@@ -338,8 +408,9 @@ def run(args):
                       throughput=sim.t/wall if wall else 0.)
         result["skipped_releases"] = max(0,nominal_releases-actual_rounds)
         write_json(out/"result.json",result)
-        from .metrics import report
-        report(out)
+        from .metrics import report, summary
+        metrics = report(out,tag=tag,interval=interval)
+    progress.log(tag,summary(metrics))
     print(f"{cfg.CONTROLLER}: {result['status']}, {sim.t:.3f}s mission, "
           f"{wall:.2f}s wall; {out}",flush=True)
     return 130 if interrupted else 0
