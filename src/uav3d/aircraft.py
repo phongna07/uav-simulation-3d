@@ -16,6 +16,18 @@ def subdivide_triangle(a, b, c, n):
     return triangles
 
 
+def vertical_stretch(ax):
+    """Screen size of one metre of altitude over one metre of ground distance.
+
+    1 for an isotropic 3D axes; larger when the box aspect exaggerates height.
+    """
+    # Axes3D has no public getter; set_box_aspect stores (x, y, z) here.
+    aspect = np.asarray(ax._box_aspect, dtype=float)
+    spans = np.array([np.ptp(ax.get_xlim()), np.ptp(ax.get_ylim()), np.ptp(ax.get_zlim())])
+    per_metre = aspect/spans
+    return float(per_metre[2]/per_metre[:2].mean())
+
+
 class QuadcopterGlyph:
     """Update a field-scale aircraft illustration from a recorded rigid pose.
 
@@ -27,6 +39,7 @@ class QuadcopterGlyph:
 
     def __init__(self, ax, color, scale, ring_points=49, face_pieces=4):
         from .replay import DepthSplitLine, DepthSplitPolys
+        self.ax = ax
         # The nose points along body +X, matching the simulation's attitude.
         lower = np.array([[-.38, -.24, -.10], [.30, -.24, -.10],
                           [.48, 0, -.10], [.30, .24, -.10], [-.38, .24, -.10]])
@@ -100,9 +113,14 @@ class QuadcopterGlyph:
         """Pose the glyph; return the occluder sets of its hidden pieces."""
         from .replay import view_directions
         rotation = Rotation.from_quat(quaternion)
+        # The axes stretch altitude relative to ground distance so low flight
+        # stays visible on a wide map. Draw the aircraft in undistorted display
+        # space instead: compress its body-relative heights by that stretch so
+        # the glyph keeps its proportions and shows the true attitude.
+        squash = np.array([1., 1., 1/vertical_stretch(self.ax)])
 
         def world(points):
-            return rotation.apply(points.reshape(-1, 3)).reshape(points.shape) + position
+            return (rotation.apply(points.reshape(-1, 3))*squash).reshape(points.shape) + position
 
         boxes = np.asarray(boxes, dtype=float).reshape(-1, 2, 3)
         # Back faces of the convex hull are culled, so the remaining (front)
@@ -111,7 +129,8 @@ class QuadcopterGlyph:
             facing = np.ones(len(self.normals), dtype=bool)
         else:
             toward = view_directions(projection, [position])[0]
-            facing = rotation.apply(self.normals) @ toward > 0
+            # Plane normals transform with the inverse of the display squash.
+            facing = (rotation.apply(self.normals)/squash) @ toward > 0
         shown = facing[self.piece_face]
         keys = self.shell.update(world(self.pieces[shown]),
                                  [c for c, s in zip(self.piece_colors, shown) if s],

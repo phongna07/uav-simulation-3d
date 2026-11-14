@@ -291,7 +291,12 @@ Errors and interrupted runs are labeled, not presented as successful missions.
 Replay reads these artifacts without importing planners. Quadcopter glyphs with
 colored bodies, four rotor rings, and white nose stripes follow recorded attitude
 and are enlarged for field-scale visibility; the vertical display aspect is also
-exaggerated when needed. Aircraft
+exaggerated when needed (about 2× for 30 m flight, 11× for 3 m flight on a
+1000 m map). The glyph cancels that stretch around its own centre, so its
+proportions and displayed tilt match the recorded attitude at any altitude;
+only its position uses the stretched altitude axis. The nose stripe shows the
+recorded yaw, which the `cmd_acc` plant holds near 0 (east), so it need not
+point along the direction of travel. Aircraft
 positions, target, footprints, and obstacles use their recorded coordinates.
 The default camera follows the recorded target at 6× magnification with a
 55-degree downward view and fixed heading. The camera aims at the point above
