@@ -385,16 +385,12 @@ def fixed_width(value, width, decimals):
     return f"{value:{width}.{decimals}f}".replace(" ", FIGURE_SPACE)
 
 
-def round_solve_times(events, ratio):
-    """(release times, d) per planning round, with d = max_i C_i in host seconds.
-
-    The raw host duration is recovered from the injected delay (delay = C*r), so
-    d does not depend on --compute-ratio; with r = 0 the measured duration is used."""
+def round_solve_times(events):
+    """(release times, d) per planning round, with d = max_i C_i in host seconds."""
     rounds = {}
     for event in events:
-        raw = event["injected_delay_s"]/ratio if ratio > 0 else event["execution_s"]
         release, d = rounds.get(event["round"], (event["observed_at"], 0.))
-        rounds[event["round"]] = (min(release, event["observed_at"]), max(d, raw))
+        rounds[event["round"]] = (min(release, event["observed_at"]), max(d, event["execution_s"]))
     ordered = sorted(rounds.values())
     return np.array([r for r, _ in ordered]), np.array([d for _, d in ordered])
 
@@ -512,7 +508,7 @@ def build_scene(args):
     events_path = directory/"events.jsonl"
     events = ([json.loads(line) for line in events_path.read_text().splitlines() if line.strip()]
               if events_path.exists() else [])
-    releases, solves = round_solve_times(events, float(cfg.get("compute_ratio", 1.)))
+    releases, solves = round_solve_times(events)
     separations = min_separations(states)
     clearances = min_obstacle_distances(states, cfg["scenario_definition"]["rects"],
                                         cfg["scenario_definition"]["circles"])

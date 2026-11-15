@@ -9,6 +9,19 @@ from . import progress
 from .upstream import UPSTREAM
 
 
+def require_zero_delay(cfg, directory):
+    """Accept only runs whose commands were delivered at their release.
+
+    Runs recorded before the delay mechanisms were removed qualify when they used
+    compute ratio 0, parallel scheduling and no --timings-from."""
+    if "planning_delay" in cfg:
+        return
+    if (float(cfg.get("compute_ratio",1.)) != 0 or cfg.get("timings_from")
+            or cfg.get("scheduling","sequential") != "parallel"):
+        raise ValueError(f"{directory}: recorded with planning delay or sequential scheduling; "
+                         "only zero-delay runs are supported")
+
+
 def braking_summary(time, braking):
     """Watchdog braking: per-drone time share and episode count (adapter safety layer)."""
     time,braking = np.asarray(time,float),np.asarray(braking,bool)
@@ -97,13 +110,10 @@ def calculate(time, aircraft, target, status, horizon, fov_half, events=(), resu
              success=bool(result and result.get("status")=="completed"),
              mission_time_s=float(time[-1]),horizon_s=horizon,
              computation_calls=len(events),
-             rejected_stale_plans=sum(e.get("accepted") is False for e in events),
-             upstream_stop_fallbacks=sum(bool(e.get("upstream_stop")) and e.get("delivered",True) for e in events))
-    for key in ("execution_s","queue_wait_s","latency_s"):
-        m.update(stats(key))
+             upstream_stop_fallbacks=sum(bool(e.get("upstream_stop")) for e in events))
+    m.update(stats("execution_s"))
     if result:
         m.update(wall_time_s=result.get("wall_time_s"),throughput=result.get("throughput"),
-                 skipped_releases=result.get("skipped_releases"),
                  termination=result.get("status"),collision=result.get("collision"))
     return m
 
@@ -122,7 +132,7 @@ def summary(m):
              gathered,
              f"visibility {m['mission_visibility']:.1f}%",
              f"coverage eff {m['mission_cov_eff']:.3f}",
-             f"latency p95 {_value(m.get('latency_s_p95'),'.3f')}s",
+             f"execution p95 {_value(m.get('execution_s_p95'),'.3f')}s",
              f"{m['computation_calls']} planner calls"]
     if m.get("collision"):
         parts.insert(1,f"collision at t={m['collision']['time']:.3f}s ({m['collision']['reason']})")
@@ -133,6 +143,7 @@ def report(directory, tag="metrics", interval=None):
     """Recompute and write metrics.{json,csv,md}; log stages under tag on stderr."""
     directory = Path(directory)
     cfg = json.loads((directory/"config.json").read_text())
+    require_zero_delay(cfg,directory)
     result = json.loads((directory/"result.json").read_text())
     ticker = progress.Ticker(progress.parse_interval(progress.default_interval())
                              if interval is None else interval)
@@ -152,7 +163,6 @@ def report(directory, tag="metrics", interval=None):
                       cfg["horizon_s"],cfg["params"]["VIEWING_RADIUS"],events,result,views)
         if "watchdog_braking" in data:
             m.update(braking_summary(data["time"],data["watchdog_braking"]))
-    m.update(compute_ratio=cfg.get("compute_ratio",1.))
     m.update(controller=cfg["controller"],scenario=cfg["scenario"],seed=cfg["seed"])
     from .experiment import write_json
     write_json(directory/"metrics.json",m)

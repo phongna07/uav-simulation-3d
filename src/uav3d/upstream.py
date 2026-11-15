@@ -59,17 +59,6 @@ TRACK_KP, TRACK_KD, STOP_ACCEL_RATIO = 9.0, 6.0, 0.8
 # at UMAX = 5), so a plan that brakes at UMAX can still be followed.
 TRACK_ACCEL_RATIO = 1.5
 VMAX_GUARD_BAND = 0.5          # m/s below VMAX at which speed-up is cut
-# A delivered plan was solved from the state at its release. It is accepted only
-# while the aircraft is still near the plan's state for the delivery time (e.g.
-# not after a watchdog stop in the meantime); otherwise the current schedule
-# continues and the next release replans from the real state.
-ACCEPT_POSITION_RADIUS_RATIO, ACCEPT_SPEED_ERROR = 0.5, 2.0
-
-
-def plan_valid(schedule, t, position, velocity, cfg):
-    p,v,_ = schedule.reference(t)
-    return (np.linalg.norm(p-np.asarray(position)[:2]) <= ACCEPT_POSITION_RADIUS_RATIO*cfg.ROBOT_RADIUS
-            and np.linalg.norm(v-np.asarray(velocity)[:2]) <= ACCEPT_SPEED_ERROR)
 
 
 def plan_schedule(robot, cfg, release, previous_backup):
@@ -128,45 +117,17 @@ def publish_prediction(robot, schedule, release):
                                                rows[:,2:],np.zeros(len(rows))])
 
 
-def set_tracker_interval(tracker, dt):
-    """Keep the upstream CV filter state, updating its F/Q for elapsed mission time."""
-    q2 = float(tracker.Q[2,2]/tracker.dt**2)
-    tracker.dt = dt
-    tracker.F = np.array([[1,0,dt,0],[0,1,0,dt],[0,0,1,0],[0,0,0,1]],float)
-    tracker.Q = q2*np.array([[dt**4/4,0,dt**3/2,0],
-                            [0,dt**4/4,0,dt**3/2],
-                            [dt**3/2,0,dt**2,0],
-                            [0,dt**3/2,0,dt**2]])
+def age_robot(robot):
+    """Shift the horizon buffers by one control step, as upstream's updateState does.
 
-
-def shift_rows(array, steps):
-    if array is None or steps <= 0:
+    The adapter replaces updateState (the plant is RotorPy), so this shift runs
+    here, before every planning round except the first."""
+    if not getattr(robot,"planned",False):
         return
-    s = min(steps,len(array)-1)
-    array[:] = np.concatenate([array[s:],np.repeat(array[-1:],s,axis=0)])
-
-
-def age_robot(robot, released, period):
-    """Age horizon buffers once per elapsed planning interval, never per physics step."""
-    previous = getattr(robot,"prediction_epoch",released)
-    steps = max(0,int(np.floor((released-previous)/period+1e-9)))
     for name in ("states_prediction","controls_prediction","_mpc_X","_mpc_U"):
-        shift_rows(getattr(robot,name,None),steps)
-    # Upstream fallback methods advance one entry themselves when invoked.
-    # Prepare their cursors at elapsed_steps-1 so that they select time-correct entries.
-    if hasattr(robot,"_backup") and robot._backup is not None:
-        robot._bk_i = min(len(robot._backup[1]),getattr(robot,"_bk_i",0)+max(0,steps-1))
-    if hasattr(robot,"_plan_left"):
-        robot._plan_left = max(0,robot._plan_left-max(0,steps-1))
-    for planner in (getattr(robot,"simple",None),getattr(robot,"impc",None)):
-        if planner is None:
-            continue
-        if hasattr(planner,"left"):
-            planner.left = max(0,planner.left-max(0,steps-1))
-        # PureMPC shifts its warm-start once internally. IMPC stores an already-shifted warm start.
-        for name in ("Xp","Up","_X","_Uw"):
-            shift_rows(getattr(planner,name,None),max(0,steps-1))
-    robot.prediction_epoch = previous+steps*period
+        array = getattr(robot,name,None)
+        if array is not None:
+            array[:-1] = array[1:]
 
 
 def initialize(cfg, starts, target):

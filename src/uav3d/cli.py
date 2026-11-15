@@ -32,11 +32,6 @@ def parser():
                             "in-process stepping. Results are bit-identical for every value "
                             "[env UAV3D_PHYSICS_WORKERS]")
         q.add_argument("--out",help="new output directory (must not already exist)")
-        q.add_argument("--timings-from",help="run directory containing previously measured delays")
-        q.add_argument("--compute-ratio",type=float,default=0.,
-                       help="scale every measured planning duration by r before injecting it as "
-                            "mission-time delay (e.g. 0.5: onboard computer twice as fast, 1: host "
-                            "speed); default 0: instantaneous planning, physics paused while solving")
         add_progress_flag(q)
         if name=="benchmark":
             q.add_argument("--controllers",nargs="+",choices=CONTROLLERS,default=list(CONTROLLERS))
@@ -86,13 +81,10 @@ def parser():
 def worker_command(args, controller, output):
     command = [sys.executable,"-m","uav3d.cli","_worker","--scenario",args.scenario,
                "--controller",controller,"--seed",str(args.seed),"--physics-dt",str(args.physics_dt),
-               "--compute-ratio",repr(args.compute_ratio),
                "--physics-workers",str(args.physics_workers),
                "--progress-interval",repr(args.progress_interval),"--out",str(output)]
-    for name in ("duration","timings_from"):
-        value = getattr(args,name)
-        if value is not None:
-            command += ["--"+name.replace("_","-"),str(value)]
+    if args.duration is not None:
+        command += ["--duration",str(args.duration)]
     return command
 
 
@@ -110,8 +102,6 @@ def main(argv=None):
             p.error("--physics-dt must be finite and positive")
         if args.duration is not None and (not math.isfinite(args.duration) or args.duration<=0):
             p.error("--duration must be finite and positive")
-        if not math.isfinite(args.compute_ratio) or args.compute_ratio<0:
-            p.error("--compute-ratio must be finite and nonnegative")
         if args.physics_workers!="auto" and not (args.physics_workers.isdigit() and int(args.physics_workers)>=1):
             p.error("--physics-workers must be 'auto' or a positive integer")
     if args.command=="_worker":
@@ -128,8 +118,6 @@ def main(argv=None):
         env.update(PYTHONHASHSEED=str(args.seed),MPLBACKEND="Agg",PYTHONUNBUFFERED="1")
         if args.command=="run":
             return subprocess.call(worker_command(args,args.controller,out),env=env)
-        if args.timings_from:
-            p.error("--timings-from is supported by run, not a multi-method benchmark")
         out.mkdir(parents=True,exist_ok=False)
         summary = []
         total = len(args.controllers)

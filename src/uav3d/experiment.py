@@ -1,5 +1,8 @@
-"""Single-run worker: host computation durations become mission-time events."""
-from dataclasses import asdict, replace
+"""Single-run worker: upstream planners on RotorPy aircraft, one planning round per control period.
+
+Commands are delivered at their planning release (no computation delay): the
+plant is paused while the planners run, and host solve times are only measured.
+"""
 import importlib.metadata
 import json
 import logging
@@ -11,7 +14,7 @@ import subprocess
 import time
 import numpy as np
 from .physics import RotorPyBackend, resolve_physics_workers
-from .scheduler import next_release, parallel_events, plan_against_snapshot, scaled_delay
+from .scheduler import plan_against_snapshot
 from . import progress, upstream
 
 
@@ -121,7 +124,7 @@ class MissionProgress:
     def log(self, message):
         progress.log(self.tag,message)
 
-    def round(self, sim, round_index, round_records, events, skipped):
+    def round(self, sim, round_index, round_records, events):
         if round_records:
             self.solves.append(max(r["execution_s"] for r in round_records))
         tracking = sim.status[:,0].astype(bool)
@@ -130,9 +133,9 @@ class MissionProgress:
                      f"({int(tracking.sum())}/{self.drones} tracking)")
         self.tracking |= tracking
         if self.ticker.due():
-            self.report(sim,round_index,events,skipped)
+            self.report(sim,round_index,events)
 
-    def report(self, sim, round_index, events, skipped):
+    def report(self, sim, round_index, events):
         wall = self.ticker.elapsed()
         pct = 100*sim.t/self.horizon if self.horizon else 100.
         parts = [f"t {sim.t:.2f}/{self.horizon:.2f}s ({pct:.1f}%)",f"round {round_index+1}",
@@ -146,9 +149,7 @@ class MissionProgress:
         braking = int(sim.braking[-1].sum()) if sim.braking else 0
         parts += [f"tracking {int(sim.status[:,0].astype(bool).sum())}/{self.drones}",
                   f"braking {braking}",
-                  f"stale plans {sum(e.get('accepted') is False for e in events)}",
-                  f"stop fallbacks {sum(bool(e.get('upstream_stop')) and e.get('delivered',True) for e in events)}",
-                  f"skipped releases {skipped}"]
+                  f"stop fallbacks {sum(bool(e.get('upstream_stop')) for e in events)}"]
         self.log(" | ".join(parts))
 
 
@@ -199,37 +200,11 @@ def run(args):
     physics_workers = resolve_physics_workers(getattr(args,"physics_workers","auto"),len(starts))
     progress.log(tag,f"{len(starts)} UAVs, mission horizon {horizon:.2f}s of {full_duration:.2f}s, "
                      f"planning period {cfg.TIMESTEP:g}s, physics dt {args.physics_dt:g}s "
-                     f"on {physics_workers} worker(s), compute ratio {args.compute_ratio:g}")
+                     f"on {physics_workers} worker(s); commands delivered at release")
     backend = RotorPyBackend(starts,args.physics_dt,physics_workers)
     # "ours" executes its whole plan by mission time; other methods hold the latest command.
     follow_plan = cfg.CONTROLLER == "ours"
     execution = "tracked_plan_with_watchdog" if follow_plan else "hold_latest"
-    replay_config = None
-    timings = None
-    if args.timings_from:
-        source = Path(args.timings_from)
-        replay_config = json.loads((source/"config.json").read_text())
-        expected = (cfg.SCENARIO_NAME,cfg.CONTROLLER,args.seed,starts.tolist(),horizon)
-        previous = (replay_config["scenario"],replay_config["controller"],replay_config["seed"],
-                    replay_config["starts"],replay_config["horizon_s"])
-        if expected != previous:
-            raise ValueError("Timing replay requires matching scenario, controller, seed, starts and horizon")
-        if replay_config.get("scheduling","sequential") != "parallel":
-            raise ValueError("Timing replay requires a source run with parallel scheduling")
-        if replay_config.get("command_execution","hold_latest") != execution:
-            raise ValueError("Timing replay requires matching command execution")
-        if replay_config["upstream_sha"] != _git_sha(upstream.UPSTREAM):
-            raise ValueError("Timing replay requires matching upstream revision")
-        for key in ("rects","circles","waypoints","speeds","params"):
-            if jsonable(cfg.SCENARIO_DEF[key]) != replay_config["scenario_definition"][key]:
-                raise ValueError(f"Timing replay scenario differs in {key}")
-        timings = [json.loads(line) for line in (source/"events.jsonl").read_text().splitlines()]
-        # Recorded delays were scaled by the source run's ratio; recover the raw duration.
-        # A ratio-0 source injected no delay, so its measured solve time is used instead.
-        source_ratio = float(replay_config.get("compute_ratio",1.))
-    ratio = args.compute_ratio
-    if timings is not None:
-        progress.log(tag,f"replaying {len(timings)} recorded planning delays from {source}")
     with progress.stage(tag,"initializing upstream planners (warm-up)"):
         robots = upstream.initialize(cfg,starts,target_samples[0])
     # Disposable warmup consumes RNG samples; measured experiments get a fresh stream.
@@ -241,14 +216,11 @@ def run(args):
                          horizon_s=horizon,full_target_duration_s=full_duration,
                          physics_dt=args.physics_dt,physics_workers=physics_workers,
                          planning_period=cfg.TIMESTEP,
-                         scheduling="parallel",command_execution=execution,
-                         compute_ratio=ratio,
+                         scheduling="parallel",planning_delay="none",command_execution=execution,
                          plan_tracking=dict(kp=upstream.TRACK_KP,kd=upstream.TRACK_KD,
                                             stop_accel_ratio=upstream.STOP_ACCEL_RATIO,
                                             track_accel_ratio=upstream.TRACK_ACCEL_RATIO,
-                                            vmax_guard_band=upstream.VMAX_GUARD_BAND,
-                                            accept_position_radius_ratio=upstream.ACCEPT_POSITION_RADIUS_RATIO,
-                                            accept_speed_error=upstream.ACCEPT_SPEED_ERROR)
+                                            vmax_guard_band=upstream.VMAX_GUARD_BAND)
                          if follow_plan else None,
                          deployment="one_worker_per_uav",order="ascending_drone_id",
                          physics="rotorpy_hummingbird_cmd_acc",aerodynamics=False,
@@ -256,7 +228,7 @@ def run(args):
                          rotorpy_sha="40b09697a6a1596d404a67f459941d46a39eedd3",
                          package_versions={p:importlib.metadata.version(p)
                                            for p in ("rotorpy","numpy","scipy","casadi","pydecomp")},
-                         initialization_s=initialization,timings_from=args.timings_from,
+                         initialization_s=initialization,
                          provenance=adapter_provenance(),
                          thread_limits={k:os.environ.get(k) for k in
                                         ("OMP_NUM_THREADS","OPENBLAS_NUM_THREADS","MKL_NUM_THREADS")})
@@ -268,29 +240,26 @@ def run(args):
     monitor = MissionProgress(tag,horizon,interval,len(starts))
     progress.log(tag,f"mission started; status every {interval:g}s of wall time"
                  if interval > 0 else "mission started")
-    release,round_index,skipped = 0.,0,0
+    round_index = 0
     events,plans,plan_epochs,plan_drones = [],[],[],[]
     wall_start = time.perf_counter()
     interrupted = False
     failure = None
     try:
-        while release < horizon-1e-12 and sim.hit is None:
+        while (release := round_index*cfg.TIMESTEP) < horizon-1e-12:
             sim.advance(release)
             if sim.hit:
                 break
             pv,net_acc = backend.observations()
             for i,robot in enumerate(robots):
-                upstream.age_robot(robot,release,cfg.TIMESTEP)
+                upstream.age_robot(robot)
                 robot.state = pv[i].copy()
                 robot.accel = net_acc[i]+cfg.D_FRAC*pv[i,3:6]
                 robot.control = backend.commands[i].copy()
                 robot.time_stamp = release
                 robot.goal = sim.target(release).copy()
-                if hasattr(robot,"last_observation"):
-                    upstream.set_tracker_interval(robot.target_tracker,release-robot.last_observation)
-                robot.last_observation = release
-            # Aircraft observations stay frozen for this round. The physical plant
-            # advances separately; no later UAV accidentally sees a future pose.
+            # The plant is paused while the planners run: every command is
+            # delivered at this release, and the solve time is only measured.
             def plan(i, robot):
                 robot.requested_command = None
                 robot.used_backup = False
@@ -300,77 +269,46 @@ def run(args):
                 measured = time.perf_counter()-before
                 if robot.requested_command is None:
                     raise RuntimeError("Upstream failed to issue an acceleration command")
-                robot.prediction_epoch = release
+                robot.planned = True
                 # Built outside the timed call; the shifted buffers change next round.
                 robot.schedule,robot.stop_current = (upstream.plan_schedule(robot,cfg,release,backup)
                                                      if follow_plan else (None,False))
-                if timings is not None:
-                    index = len(events)+i
-                    if index >= len(timings):
-                        raise ValueError("Timing replay exhausted before mission completion")
-                    recorded = timings[index]
-                    if recorded["round"] != round_index or recorded["drone"] != i:
-                        raise ValueError("Timing replay planning sequence does not match")
-                    raw = (float(recorded["injected_delay_s"])/source_ratio if source_ratio > 0
-                           else float(recorded["execution_s"]))
-                    delay = scaled_delay(raw,ratio)
-                else:
-                    delay = scaled_delay(measured,ratio)
-                if not np.isfinite(delay) or delay < 0:
-                    raise ValueError("Invalid recorded computation duration")
-                return measured,delay
+                return measured
 
-            def deliver(event, robot):
-                record = asdict(event)|dict(queue_wait_s=event.queue_wait_s,latency_s=event.latency_s,
-                                           requested_command=robot.requested_command.tolist(),delivered=False,
-                                           upstream_stop=bool(robot.stop_current),
-                                           used_backup=bool(getattr(robot,"used_backup",False)),
-                                           solver_failures=upstream.failure_count(robot,cfg.CONTROLLER))
-                if sim.hit is None and event.completed_at <= horizon+1e-12:
-                    backend.commands[event.drone] = robot.requested_command
-                    current = sim.schedules[event.drone]
-                    if robot.stop_current and current is not None:
-                        # Upstream fell back to stopping. The aircraft flew the current
-                        # plan, not the backup branch, so it stops along that plan now,
-                        # and publishes that stop as its prediction.
-                        sim.schedules[event.drone] = current.stopped(sim.t)
-                        upstream.publish_prediction(robot,sim.schedules[event.drone],release)
-                    elif robot.schedule is not None and current is not None and not upstream.plan_valid(
-                            robot.schedule,sim.t,backend.positions()[event.drone],
-                            backend.velocities()[event.drone],cfg):
-                        # Stale: solved for a state the aircraft has left. Keep flying
-                        # (or stopping along) the current plan and publish that instead.
-                        record["accepted"] = False
-                        upstream.publish_prediction(robot,current,release)
-                    else:
-                        sim.schedules[event.drone] = robot.schedule
-                    if sim.schedules[event.drone] is not None:
-                        # Delivered late: continue at the plan step for now, not U[0].
-                        sim.apply_schedules(sim.t)
-                    sim.status[event.drone] = (robot.mode == cfg.MODE_TRACK,robot.is_leader_role,
-                                               getattr(robot,"mpc_fail_streak",0))
-                    record["delivered"] = True
-                    plans.append(robot.states_prediction.copy())
-                    plan_epochs.append([release,event.completed_at])
-                    plan_drones.append(event.drone)
+            def deliver(i, robot, measured):
+                record = dict(round=round_index,drone=i,observed_at=release,completed_at=release,
+                              execution_s=measured,requested_command=robot.requested_command.tolist(),
+                              upstream_stop=bool(robot.stop_current),
+                              used_backup=bool(getattr(robot,"used_backup",False)),
+                              solver_failures=upstream.failure_count(robot,cfg.CONTROLLER))
+                backend.commands[i] = robot.requested_command
+                current = sim.schedules[i]
+                if robot.stop_current and current is not None:
+                    # Upstream fell back to stopping. The aircraft flew the current
+                    # plan, not the backup branch, so it stops along that plan now,
+                    # and publishes that stop as its prediction.
+                    sim.schedules[i] = current.stopped(sim.t)
+                    upstream.publish_prediction(robot,sim.schedules[i],release)
+                else:
+                    sim.schedules[i] = robot.schedule
+                if sim.schedules[i] is not None:
+                    sim.apply_schedules(sim.t)      # the plan's command for this instant
+                sim.status[i] = (robot.mode == cfg.MODE_TRACK,robot.is_leader_role,
+                                 getattr(robot,"mpc_fail_streak",0))
+                plans.append(robot.states_prediction.copy())
+                plan_epochs.append([release,release])
+                plan_drones.append(i)
                 events.append(record)
                 # Persist events as they complete, so partial runs are inspectable.
                 with (out/"events.jsonl").open("a") as f:
                     f.write(json.dumps(record)+"\n")
 
-            # One worker per UAV: every planner sees the pre-round team predictions,
-            # and all commands arrive together after the slowest solve, d = max(C_i).
-            timed = plan_against_snapshot(robots,lambda i,robot: plan(i,robot))
-            round_events = list(parallel_events([d for _,d in timed],release,round_index))
-            sim.advance(round_events[0].completed_at)
-            for event,(measured,_),robot in zip(round_events,timed,robots):
-                deliver(replace(event,execution_s=measured),robot)
+            # One planner per UAV: every planner sees the pre-round team predictions.
+            measured = plan_against_snapshot(robots,plan)
+            for i,(robot,duration) in enumerate(zip(robots,measured)):
+                deliver(i,robot,duration)
             sim.sample()
-            monitor.round(sim,round_index,events[-len(round_events):],events,skipped)
-            if sim.hit is not None or sim.t >= horizon-1e-12:
-                break
-            release,missed = next_release(sim.t,release,cfg.TIMESTEP)
-            skipped += missed
+            monitor.round(sim,round_index,events[-len(robots):],events)
             round_index += 1
         if sim.hit is None:
             sim.advance(horizon)
@@ -399,14 +337,11 @@ def run(args):
         np.savez_compressed(out/"plans.npz",prediction=np.array(plans),
                             epochs=np.array(plan_epochs),drone=np.array(plan_drones))
         (out/"events.jsonl").touch(exist_ok=True)
-        actual_rounds = len({event["round"] for event in events})
-        nominal_releases = max(0,math.ceil(sim.t/cfg.TIMESTEP-1e-10))
         result = dict(status="error" if failure else "interrupted" if interrupted else "collision" if sim.hit else "completed",
                       collision=sim.hit,mission_time_s=sim.t,wall_time_s=wall,
-                      initialization_s=initialization,skipped_releases=skipped,
-                      planning_rounds=actual_rounds,error=failure,
+                      initialization_s=initialization,
+                      planning_rounds=len({event["round"] for event in events}),error=failure,
                       throughput=sim.t/wall if wall else 0.)
-        result["skipped_releases"] = max(0,nominal_releases-actual_rounds)
         write_json(out/"result.json",result)
         from .metrics import report, summary
         metrics = report(out,tag=tag,interval=interval)

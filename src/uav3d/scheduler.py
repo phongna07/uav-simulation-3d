@@ -1,55 +1,7 @@
-"""Pure scheduling rules, independent of host execution speed and physics."""
+"""Planning-round rules and plan tracking, independent of host execution speed and physics."""
 import math
 from dataclasses import dataclass
 import numpy as np
-
-
-@dataclass(frozen=True)
-class PlanningEvent:
-    round: int
-    drone: int
-    observed_at: float
-    started_at: float
-    completed_at: float
-    execution_s: float
-    injected_delay_s: float
-
-    @property
-    def queue_wait_s(self):
-        return self.started_at-self.observed_at
-
-    @property
-    def latency_s(self):
-        return self.completed_at-self.observed_at
-
-
-def next_release(completed, released, period):
-    """Next grid boundary; an exact completion boundary is available."""
-    tick = max(round(released/period)+1, math.ceil(completed/period-1e-10))
-    return tick*period, tick-round(released/period)-1
-
-
-def scaled_delay(duration, ratio=1.):
-    """Mission-time delay for a host-measured solve on hardware `1/ratio` times as fast.
-
-    ratio=1 (default) injects the measured host duration unchanged; ratio=0 delivers
-    every command at its release (instantaneous planning, physics frozen while solving)."""
-    if not math.isfinite(ratio) or ratio < 0:
-        raise ValueError("Compute ratio must be finite and nonnegative")
-    if not math.isfinite(duration) or duration < 0:
-        raise ValueError("Planning duration must be finite and nonnegative")
-    return duration*ratio
-
-
-def parallel_events(durations, release=0., round_index=0):
-    """One worker per UAV: all start at release, all deliver at release+max(C_i)."""
-    durations = list(durations)
-    for duration in durations:
-        if not math.isfinite(duration) or duration < 0:
-            raise ValueError("Planning duration must be finite and nonnegative")
-    end = release+max(durations, default=0.)
-    for i, duration in enumerate(durations):
-        yield PlanningEvent(round_index,i,release,release,end,duration,duration)
 
 
 def plan_against_snapshot(robots, plan):
@@ -70,15 +22,14 @@ def plan_against_snapshot(robots, plan):
     return results
 
 
-
 @dataclass(frozen=True)
 class PlanSchedule:
     """A delivered plan, tracked by mission time.
 
     states[k] = [px, py, vx, vy] is planned at start+k*period and controls[k]
     is applied on [start+k*period, start+(k+1)*period). The aircraft tracks the
-    plan, u = u_ff + kp*(p_ref-p) + kd*(v_ref-v), so model mismatch does not
-    accumulate however long the next plan takes. The planned u_ff already lies
+    plan, u = u_ff + kp*(p_ref-p) + kd*(v_ref-v), so the mismatch between the
+    planning model and the plant does not accumulate. The planned u_ff already lies
     within the planner's limit; the correction may add up to track_umax in
     total, so a plan at its limit can still be tracked. Within vmax_band of vmax
     the component of u that would speed the aircraft up is removed (the attitude

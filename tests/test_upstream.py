@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from uav3d.cli import parser
-from uav3d.upstream import age_robot,set_tracker_interval,UPSTREAM
+from uav3d.upstream import age_robot,UPSTREAM
 
 
 def test_cli_defaults():
@@ -39,27 +39,14 @@ print(json.dumps(starts.tolist()))
     assert json.loads(first)==json.loads(second)
 
 
-def test_prediction_and_fallback_age_by_elapsed_time():
+def test_buffers_shift_one_step_per_round_after_the_first():
     values=np.arange(6.)[:,None]
-    robot=SimpleNamespace(prediction_epoch=0.,states_prediction=values.copy(),
-                          controls_prediction=values.copy(),_mpc_X=values.copy(),_mpc_U=values.copy(),
-                          _backup=(values.copy(),values.copy()),_bk_i=0,_plan_left=5,
-                          simple=SimpleNamespace(left=5,Xp=values.copy(),Up=values.copy()))
-    age_robot(robot,.3,.1)
-    assert robot.states_prediction[:,0].tolist()==[3,4,5,5,5,5]
-    assert robot._bk_i==2  # Fallback advances the remaining one step on invocation.
-    assert robot.simple.left==3
-    before=robot.states_prediction.copy()
-    age_robot(robot,.3,.1)
-    np.testing.assert_array_equal(robot.states_prediction,before)
-
-
-def test_estimator_interval_preserves_state_and_noise_density():
-    sys.path.insert(0,str(UPSTREAM))
-    from kalman_target import KalmanTargetTracker
-    tracker=KalmanTargetTracker(dt=.1,process_noise_std=2.)
-    tracker.initialize([3,4])
-    set_tracker_interval(tracker,.3)
-    assert tracker.F[0,2]==.3
-    assert tracker.Q[2,2]==pytest.approx(4*.3**2)
-    np.testing.assert_array_equal(tracker.x,[3,4,0,0])
+    robot=SimpleNamespace(states_prediction=values.copy(),controls_prediction=values.copy(),
+                          _mpc_X=values.copy(),_mpc_U=None,_bk_i=0,_plan_left=5)
+    age_robot(robot)                                   # before the first plan: unchanged
+    assert robot.states_prediction[:,0].tolist()==[0,1,2,3,4,5]
+    robot.planned=True
+    age_robot(robot)
+    for name in ("states_prediction","controls_prediction","_mpc_X"):
+        assert getattr(robot,name)[:,0].tolist()==[1,2,3,4,5,5]  # as upstream updateState
+    assert robot._bk_i==0 and robot._plan_left==5      # fallback cursors advance in upstream

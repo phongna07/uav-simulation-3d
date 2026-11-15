@@ -25,7 +25,7 @@ def make_run(directory, samples=40, duration=2.):
     target = np.c_[10 + 30*t/duration, np.full(samples, 25.), np.full(samples, 3.)]
     np.savez(directory/"trajectory.npz", time=t, aircraft=aircraft, target=target)
     (directory/"config.json").write_text(json.dumps({
-        "scenario": "test", "controller": "ours", "compute_ratio": 0.,
+        "scenario": "test", "controller": "ours", "planning_delay": "none",
         "params": {"WORLD_BOUNDS": [0, 0, 50, 50], "VIEWING_RADIUS": 3.,
                    "ROBOT_RADIUS": .5},
         "scenario_definition": {"rects": [[22, 26, 6, 6]], "circles": [[30, 18, 3]]}}))

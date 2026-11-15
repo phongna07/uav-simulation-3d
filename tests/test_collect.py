@@ -17,20 +17,19 @@ def make_run(path, controller="ours", horizon=2., full=150., collision=None, sta
         status = np.zeros((len(time),n,3),int)
     cfg = dict(scenario="scen1",controller=controller,seed=0,starts=aircraft[0,:,:3].tolist(),
                horizon_s=horizon,full_target_duration_s=full,planning_period=.1,
-               scheduling="parallel",compute_ratio=0.,command_execution="hold_latest",
+               scheduling="parallel",planning_delay="none",command_execution="hold_latest",
                params=dict(VIEWING_RADIUS=25.,ROBOT_RADIUS=.5),
                scenario_definition=dict(rects=[[50,-5,10,10]],circles=[],waypoints=[[0,0],[100,0]]))
     (path/"config.json").write_text(json.dumps(cfg))
-    events = [dict(round=r,drone=i,observed_at=r*.1,started_at=r*.1,completed_at=r*.1,
-                   execution_s=.01*(i+1),injected_delay_s=0.,queue_wait_s=0.,latency_s=0.,
-                   delivered=True,upstream_stop=False,used_backup=False,solver_failures=r//5)
+    events = [dict(round=r,drone=i,observed_at=r*.1,completed_at=r*.1,execution_s=.01*(i+1),
+                   upstream_stop=False,used_backup=False,solver_failures=r//5)
               for r in range(int(round(horizon/.1))) for i in range(n)]
     (path/"events.jsonl").write_text("".join(json.dumps(e)+"\n" for e in events))
     np.savez_compressed(path/"trajectory.npz",time=time,aircraft=aircraft,target=target,
                         command=np.zeros((len(time),n,3)),status=status,
                         watchdog_braking=np.zeros((len(time),n),bool))
     result = dict(status="collision" if collision else "completed",collision=collision,
-                  mission_time_s=float(time[-1]),wall_time_s=1.,throughput=2.,skipped_releases=0)
+                  mission_time_s=float(time[-1]),wall_time_s=1.,throughput=2.)
     (path/"result.json").write_text(json.dumps(result))
     if mtime is not None:
         os.utime(path/"result.json",(mtime,mtime))
@@ -107,3 +106,21 @@ def test_benchmark_directory_expands(tmp_path):
     make_run(tmp_path/"bench"/"ours")
     make_run(tmp_path/"bench"/"apf",controller="apf")
     assert [p.name for p in collect.expand(tmp_path/"bench")] == ["apf","ours"]
+
+
+def test_runs_with_planning_delay_are_rejected(tmp_path):
+    from uav3d.metrics import require_zero_delay
+    require_zero_delay(dict(planning_delay="none"),"new")
+    require_zero_delay(dict(scheduling="parallel",compute_ratio=0.),"old zero-delay run")
+    for cfg in (dict(scheduling="parallel",compute_ratio=.5),
+                dict(scheduling="parallel",compute_ratio=0.,timings_from="runs/x"),
+                dict(scheduling="sequential",compute_ratio=0.),
+                dict(scheduling="parallel")):           # before compute_ratio: measured delay
+        with pytest.raises(ValueError,match="planning delay"):
+            require_zero_delay(cfg,"old")
+    run = make_run(tmp_path/"delayed")
+    cfg = json.loads((run/"config.json").read_text())
+    del cfg["planning_delay"]
+    (run/"config.json").write_text(json.dumps(cfg|dict(compute_ratio=1.)))
+    with pytest.raises(ValueError):
+        collect.evaluate(run)

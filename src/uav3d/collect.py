@@ -17,7 +17,7 @@ from pathlib import Path
 import sys
 import numpy as np
 from . import CONTROLLERS
-from .metrics import braking_summary, calculate, target_views
+from .metrics import braking_summary, calculate, require_zero_delay, target_views
 from .upstream import UPSTREAM
 
 PAPER, RUN, SAFETY, FORMATION, TRACKING, COMPUTATION, FALLBACKS = (
@@ -65,9 +65,6 @@ METRICS = [
     M("finished_utc","Run finished (UTC)",RUN,None,"Modification time of result.json"),
     M("uavs","UAVs",RUN,"{:d}","Number of UAVs"),
     M("seed","Seed",RUN,"{:d}","run --seed"),
-    M("scheduling","Scheduling",RUN,None,"Recorded scheduling (parallel; older runs may be sequential)"),
-    M("compute_ratio","Compute ratio r",RUN,"{:g}",
-      "run --compute-ratio: mission-time delay = r x measured solve time (0: instantaneous)"),
     M("command_execution","Command execution",RUN,None,
       "tracked_plan_with_watchdog (ours) or hold_latest"),
     M("horizon_s","Mission length T [s]",RUN,"{:.1f}","Evaluated mission length"),
@@ -121,18 +118,11 @@ METRICS = [
     M("solve_p95_ms","Solve time per UAV, p95 [ms]",COMPUTATION,"{:.1f}","As above, 95th percentile"),
     M("solve_max_ms","Solve time per UAV, max [ms]",COMPUTATION,"{:.1f}","As above, maximum"),
     M("round_median_ms","Fleet planning round, median [ms]",COMPUTATION,"{:.1f}",
-      "Host compute per control step for the fleet: slowest UAV (parallel) or sum (sequential)"),
+      "Host compute per control step for the fleet: slowest UAV (one planner per UAV)"),
     M("round_p95_ms","Fleet planning round, p95 [ms]",COMPUTATION,"{:.1f}","As above, 95th percentile"),
     M("round_max_ms","Fleet planning round, max [ms]",COMPUTATION,"{:.1f}","As above, maximum"),
     M("slow_rounds_pct","Rounds slower than the control period [%]",COMPUTATION,"{:.1f}",
       "Fleet planning rounds above TIMESTEP (host compute)"),
-    M("latency_mean_ms","Command latency, mean [ms]",COMPUTATION,"{:.1f}",
-      "Mission time from observation to command delivery (r x solve time, plus queueing)"),
-    M("latency_p95_ms","Command latency, p95 [ms]",COMPUTATION,"{:.1f}","As above, 95th percentile"),
-    M("late_rounds_pct","Late command delivery [%]",COMPUTATION,"{:.2f}",
-      "Rounds whose last command arrived more than one control period after release"),
-    M("skipped_releases","Skipped planning releases",COMPUTATION,"{:d}",
-      "Control periods without a planning round because the previous one was still running"),
 
     M("solver_failures","Solver failures",FALLBACKS,"{:d}",
       "Failed or infeasible solves counted by upstream (mpc / pure MPC / IMPC n_fail, "
@@ -141,10 +131,6 @@ METRICS = [
       "Commands taken from upstream's backup branch (ours)"),
     M("upstream_stops","Upstream stop fallbacks",FALLBACKS,"{:d}",
       "Delivered results in which upstream fell back to stopping along the current plan"),
-    M("stale_plans","Stale plans rejected",FALLBACKS,"{:d}",
-      "Adapter: delivered plans not accepted because the aircraft had left their start state"),
-    M("undelivered","Results not delivered",FALLBACKS,"{:d}",
-      "Solves finished after the first collision or the mission end"),
     M("watchdog_pct_max","Watchdog braking, max UAV [%]",FALLBACKS,"{:.1f}",
       "Adapter: time a UAV braked past the end of its plan (ours), worst UAV"),
     M("watchdog_episodes","Watchdog braking episodes",FALLBACKS,"{:d}","Adapter: braking episodes, all UAVs"),
@@ -196,19 +182,19 @@ def _min_pair_distance(aircraft):
                      for i in range(n) for j in range(i)))
 
 
-def _rounds(events, scheduling):
+def _rounds(events):
+    """Host compute of each planning round: its slowest UAV."""
     rounds = {}
     for e in events:
-        rounds.setdefault(e["round"],[]).append(e)
-    host = [(max if scheduling == "parallel" else sum)(e["execution_s"] for e in r) for r in rounds.values()]
-    late = [max(e["completed_at"] for e in r)-r[0]["observed_at"] for r in rounds.values()]
-    return np.array(host,float),np.array(late,float)
+        rounds[e["round"]] = max(rounds.get(e["round"],0.),e["execution_s"])
+    return np.array(list(rounds.values()),float)
 
 
 def evaluate(directory):
     """All table metrics of one run directory; None marks a metric the run cannot define."""
     directory = Path(directory)
     cfg = json.loads((directory/"config.json").read_text())
+    require_zero_delay(cfg,directory)
     result = json.loads((directory/"result.json").read_text())
     events = [json.loads(l) for l in (directory/"events.jsonl").read_text().splitlines() if l.strip()]
     with np.load(directory/"trajectory.npz") as data:
@@ -258,8 +244,7 @@ def evaluate(directory):
     except ValueError:
         run_id = directory.name
     m.update(run_id=run_id,finished_utc=finished.strftime("%Y-%m-%d %H:%M:%S"),uavs=n,
-             seed=cfg.get("seed"),scheduling=cfg.get("scheduling","sequential"),
-             compute_ratio=cfg.get("compute_ratio",1.),
+             seed=cfg.get("seed"),
              command_execution=cfg.get("command_execution","hold_latest"),horizon_s=horizon,
              mission_time_s=t_end,termination=result.get("status"),
              waypoints_reached=_waypoints_reached(cfg["scenario_definition"].get("waypoints",[]),target),
@@ -309,15 +294,11 @@ def evaluate(directory):
     m["visibility_flown_pct"] = 100*float(weights@visible)/t_end if t_end > 0 else None
     m["coverage_flown"] = float(weights@coverage)/t_end if t_end > 0 else None
 
-    host,late = _rounds(events,m["scheduling"])
+    host = _rounds(events)
     if host.size:
         m["round_median_ms"] = float(np.median(host))*1e3
         m["round_p95_ms"],m["round_max_ms"] = float(np.percentile(host,95))*1e3,float(host.max())*1e3
         m["slow_rounds_pct"] = 100*float(np.mean(host > period+1e-12))
-        m["late_rounds_pct"] = 100*float(np.mean(late > period+1e-9))
-    lat_mean,lat_p95,_ = _stats([e["latency_s"] for e in events],1e3)
-    m["latency_mean_ms"],m["latency_p95_ms"] = lat_mean,lat_p95
-    m["skipped_releases"] = result.get("skipped_releases")
 
     counters = {}
     for e in events:
@@ -327,8 +308,6 @@ def evaluate(directory):
     m["backup_used"] = sum(bool(e.get("used_backup")) for e in events) if any(
         "used_backup" in e for e in events) else None
     m["upstream_stops"] = base["upstream_stop_fallbacks"]
-    m["stale_plans"] = base["rejected_stale_plans"]
-    m["undelivered"] = sum(e.get("delivered") is False for e in events)
     if braking is not None and len(time) > 1 and cfg.get("command_execution") == "tracked_plan_with_watchdog":
         b = braking_summary(time,braking)
         m["watchdog_pct_max"],m["watchdog_episodes"] = b["watchdog_braking_pct_max"],b["watchdog_braking_episodes"]
@@ -422,8 +401,8 @@ def markdown(preset, rows, updated):
     lines += [f"| {m.label} | {m.definition} |" for m in METRICS]
     lines += ["","Gathering, re-formation, mission coverage and target loss follow upstream "
               "`thesis_metrics.py`; FOVs are squares of side 2 x VIEWING_RADIUS = 2L. Samples are "
-              "time-weighted on the recorded physics grid. Compare rows only when their compute "
-              "ratio and scheduling match.",""]
+              "time-weighted on the recorded physics grid. Commands are delivered at their "
+              "planning release (no computation delay).",""]
     return "\n".join(lines)
 
 
@@ -558,8 +537,7 @@ def describe(path):
     try:
         cfg = json.loads((path/"config.json").read_text())
         result = json.loads((path/"result.json").read_text())
-        return (f"{cfg['controller']:<12} {preset_name(cfg):<24} r={cfg.get('compute_ratio',1.):g} "
-                f"{result.get('status')}")
+        return f"{cfg['controller']:<12} {preset_name(cfg):<24} {result.get('status')}"
     except (OSError,KeyError,ValueError):
         return "unreadable"
 
@@ -591,7 +569,6 @@ def main(args):
         runs = [r for name in args.runs for r in resolve(name)]
     else:
         runs = choose()
-    written = set()
     for run in runs:
         print(f"collect: {run} ...",flush=True)
         preset,algorithm,old,skipped = add_run(run,args.out_dir,args.force)
@@ -600,10 +577,4 @@ def main(args):
             continue
         replaced = f" (replaced {old.get('run_id')})" if old else ""
         print(f"  {algorithm} -> {Path(args.out_dir)/preset}.{{xlsx,csv,md}}{replaced}")
-        written.add(preset)
-        rows = read_rows(Path(args.out_dir)/f"{preset}.csv")
-        mixed = {(r.get("compute_ratio"),r.get("scheduling")) for r in rows.values()}
-        if len(mixed) > 1:
-            print(f"  warning: {preset} mixes compute ratio / scheduling across algorithms: "
-                  + ", ".join(f"r={r:g} {s}" for r,s in sorted(mixed,key=str) if r is not None))
     return 0

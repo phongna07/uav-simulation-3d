@@ -47,9 +47,6 @@ uv run uav3d replay runs/ours-demo --out exports/ours.mp4 --speed 5 --fps 24
 uv run uav3d replay runs/ours-demo --out exports/closeup.mp4 --zoom 4
 uv run uav3d replay runs/ours-demo --out exports/overview.mp4 --camera overview
 
-# Reuse a run's measured command delays; keep all experiment options identical.
-uv run uav3d run --duration 10 --timings-from runs/ours-demo --out runs/ours-repeated
-
 # Add recorded runs to the per-preset comparison tables in metrics/ (no simulation).
 uv run uav3d collect ours-demo            # a run under runs/ (or a path)
 uv run uav3d collect comparison           # every method of a benchmark directory
@@ -80,8 +77,8 @@ captures clean JSON. Lines never use carriage returns, so a redirected log file
   planner warm-up time), each UAV's first switch to target tracking, then a
   periodic status line: mission time and percentage, planning round, wall time,
   mission-to-wall speed and ETA, round solve time (mean/max of the slowest UAV
-  per round since the last line), UAVs tracking, UAVs in watchdog braking,
-  rejected stale plans, upstream stop fallbacks and skipped releases. A
+  per round since the last line), UAVs tracking, UAVs in watchdog braking and
+  upstream stop fallbacks. A
   collision, interruption or error is reported as it ends the mission, followed
   by artifact writing and a one-line metrics digest.
 - **benchmark**: `[k/N] controller` before and after each child run, with its
@@ -95,60 +92,54 @@ captures clean JSON. Lines never use carriage returns, so a redirected log file
 `--progress-interval SECONDS` (env `UAV3D_PROGRESS_INTERVAL`, default 10) sets
 the wall-time spacing of the periodic lines; `0` keeps only stage and event
 lines. Status lines are produced between planning rounds, outside every timed
-planner call, so they never count as planning delay and do not change any
+planner call, so they never count as planning time and do not change any
 trajectory (only `wall_time_s`/`throughput` include their negligible cost).
 
 ## Timing semantics
 
-Scheduling is always **parallel**: one planning worker per UAV (there is no
-`--scheduling` option; `config.json` records `scheduling: parallel`).
-At each admitted nominal planning release, every planner observes the same
-team/target snapshot, including the other UAVs' predictions from before the
-round (never a same-round plan). With planning-call durations `C_i`, all
-commands arrive together at:
+Planning has **no computation delay**: every command is delivered at its
+planning release. At each release `k*Δt` (`Δt` = upstream `TIMESTEP`) the
+plant is paused, every planner observes the same team/target snapshot,
+including the other UAVs' predictions from before the round (never a
+same-round plan), and all commands take effect at that same instant. RotorPy
+and the target then advance for one period under those commands, with
+attitude and altitude control running at the physics rate. This matches the
+synchronous step of the upstream 2-D simulation; `config.json` records
+`scheduling: parallel` and `planning_delay: none`.
 
-```text
-release_time + d,   d = max(C_0, ..., C_N-1)
-```
+Host solves run one after another, each measured single-threaded. The
+measurement covers the upstream sensing, estimation, formation, planning,
+optimization, and fallback call and is reported only (`execution_s` per event;
+the fleet round time is the slowest UAV, as for one onboard computer per UAV).
+It never changes the mission. **Physics, logging, metrics, and rendering wall
+time are not counted as planning time.** Each run uses a fresh subprocess and
+single-thread numerical-library limits; benchmark runs execute sequentially.
+For publication timings, avoid unrelated concurrent CPU workloads.
 
-Host solves still run one after another, each measured single-threaded, so
-`d` models dedicated hardware rather than host parallelism. Events record each
-drone's own `C_i` as `execution_s`/`injected_delay_s`; `latency_s` is `d`.
+Numba and solver compilation are warmed on disposable robots. Live robots have
+fresh maps, estimators, controller state, seeds, and empty histories; warmed
+CasADi solver workspaces are reused with fresh numerical initial guesses to
+avoid counting lazy solver compilation. Later problem-size growth is real work
+and remains timed. Initialization wall time is recorded separately.
 
-`--compute-ratio r` (default `0`) models faster (or slower) planning hardware,
-e.g. a powerful onboard computer: every measured duration is multiplied by `r`
-before it is injected as mission-time delay, so the
-commands arrive at `release_time + r*max(C_i)`. `r=0.5` halves the delay;
-`r=0` delivers every command at its release (instantaneous planning: physics is
-frozen while the host solves, so no planning period is ever skipped); `r=1`
-injects the measured host duration unchanged. It is
-a compatibility layer on timing only; the planner calls are unchanged. Events
-keep the raw host duration in `execution_s` and the scaled delay in
-`injected_delay_s`; `config.json` records `compute_ratio`. `--timings-from`
-divides the source run's delays by its recorded ratio and applies the new one,
-so the same measured timings can be replayed at different ratios; a ratio-0
-source injected no delay, so its measured `execution_s` is replayed instead.
+The adapter replaces upstream's `updateState` (the plant is RotorPy), so it
+also performs that method's one-row shift of the horizon buffers before every
+round after the first. The target filter keeps upstream's fixed `Δt`. Upstream
+shared leader/slot bookkeeping is retained.
+
 Events also record `used_backup` (upstream's contingency branch issued the
 command) and `solver_failures`, upstream's own cumulative failed/infeasible
 solve counter for that UAV (read only; absent for APF).
 
-Safety-layer activity is logged for `ours`: `trajectory.npz` has a per-sample,
-per-drone `watchdog_braking` flag (the drone is past its plan's stop point and
-braking to rest), events record `upstream_stop` (upstream fell back to its
-backup, so the aircraft stops along its current plan) and `accepted: false`
-(stale plan rejected). `metrics.json` summarizes these as
-`watchdog_braking_pct_*`, `watchdog_braking_episodes`, `upstream_stop_fallbacks`
-and `rejected_stale_plans`.
+## Command execution
 
-During planning delays RotorPy and the target advance in simulation time;
-attitude and altitude control keep running. Other methods hold their latest
-horizontal command. For `ours` (`command_execution: tracked_plan_with_watchdog`),
-each delivered result is the whole plan, followed by mission time at the
-physics rate:
+Other methods hold their latest horizontal command for the period. For `ours`
+(`command_execution: tracked_plan_with_watchdog`), each result is the whole
+plan, followed by mission time at the physics rate:
 
 - **Time-indexed plan.** `U[k]` is the feedforward on
-  `[release + k*dt, release + (k+1)*dt)`; a late plan starts at its current
-  step, not `U[0]`. The previous plan keeps playing until a new one is accepted.
+  `[release + k*dt, release + (k+1)*dt)`; each plan replaces the previous one
+  at its release.
 - **Tracking.** `u = U[k] + 9*(p_plan - p) + 6*(v_plan - v)` (3 rad/s,
   critically damped) removes the drift between upstream's lag model and
   RotorPy. Only the correction may raise the command above `UMAX`, up to
@@ -160,48 +151,24 @@ physics rate:
   end point. When upstream falls back to its CONTINGENCY backup (failed solve),
   the aircraft has been flying the plan, not the backup branch, so it starts this
   stop immediately and publishes it as its prediction.
-- **Stale-plan rejection.** A plan solved for an earlier state is accepted only
-  if, at delivery, the aircraft is within `0.5*ROBOT_RADIUS` and 2 m/s of the
-  plan's state for that time. Otherwise the current schedule continues, its
-  trajectory is published, and the next release replans from the real state.
-  Events record `accepted: false`.
 - **Speed guard.** Within 0.5 m/s of `VMAX` the speed-increasing part of the
-  command is removed; above it, it brakes by `6*(VMAX - speed)`. Holding one
-  command for several periods had driven aircraft far past `VMAX`, after which
-  the MPC's hard speed bound is infeasible.
+  command is removed; above it, it brakes by `6*(VMAX - speed)`. Without it,
+  aircraft overshoot `VMAX`, after which the MPC's hard speed bound is
+  infeasible.
 
 These gains and ratios are adapter constants in `upstream.py`, recorded in
-`config.json` under `plan_tracking`. Results and predictions are published only on completion. Nominal
-releases while the worker is busy are dropped, without creating a request
-backlog. Upstream shared leader/slot bookkeeping is retained.
+`config.json` under `plan_tracking`. Safety-layer activity is logged:
+`trajectory.npz` has a per-sample, per-drone `watchdog_braking` flag (the drone
+is past its plan's stop point and braking to rest), and events record
+`upstream_stop` (upstream fell back to its backup, so the aircraft stops along
+its current plan). `metrics.json` summarizes these as `watchdog_braking_pct_*`,
+`watchdog_braking_episodes` and `upstream_stop_fallbacks`. Model mismatch can
+invalidate original safety guarantees; failures are recorded.
 
-Host execution can be sequential and slower than real time. **Physics,
-logging, metrics, and rendering wall time are not injected as planner delay.**
-Planning measurements cover the upstream sensing, estimation, formation,
-planning, optimization, and fallback call. Queue wait and total observation age
-are reported separately. Each run uses a fresh subprocess and single-thread
-numerical-library limits; benchmark runs execute sequentially. For publication
-timings, avoid unrelated concurrent CPU workloads.
-
-Numba and solver compilation are warmed on disposable robots. Live robots have
-fresh maps, estimators, controller state, seeds, and empty histories; warmed
-CasADi solver workspaces are reused with fresh numerical initial guesses to
-avoid counting lazy solver compilation. Later problem-size growth is real work
-and remains timed. Initialization wall time is recorded separately.
-
-Prediction buffers and fallback cursors age by elapsed nominal intervals.
-The target filter's transition/noise matrices use actual observation spacing.
-Upstream cycle-count hysteresis is retained, so missed releases slow those
-decisions. `cbf_qp_lag` retains its fixed upstream lookahead; it is not retuned
-automatically for the measured computation delays. Delayed flight and model
-mismatch can invalidate original safety guarantees; failures are recorded.
-
-Identical seeds do not reproduce OS-dependent solve durations. `--timings-from`
-reuses recorded delays while recomputing commands in closed loop. It requires
-the same controller, scenario, seed, starts, duration, and upstream revision. The
-physics step may differ for a controlled numerical-convergence comparison. It
-cannot extend a recording past its captured calls. This is distinct from
-`replay`, which only renders recorded aircraft poses.
+Identical seeds do not reproduce OS-dependent solve durations, but solve
+durations do not affect the mission, so the same seed and options reproduce the
+same trajectories. This is distinct from `replay`, which only renders recorded
+aircraft poses.
 
 ## Physical model and collision definition
 
@@ -262,10 +229,10 @@ Each run saves:
 - `trajectory.npz`: mission `time`; `aircraft` shaped `(samples, drones, 17)`
   with `[x,y,z,vx,vy,vz,qx,qy,qz,qw,wx,wy,wz,rotor_speed_1..4]`;
   `target`, applied `command`, and published `status` (`TRACK`, leader, fail streak).
-- `events.jsonl`: each measured planning call, observation/start/completion
-  times, requested acceleration, queue wait, latency, and whether it arrived
-  before termination. An undelivered last result can lie beyond the horizon.
-- `plans.npz`: published predictions, their observation/publication epochs,
+- `events.jsonl`: each planning call: round, drone, release time
+  (`observed_at`, equal to the delivery time `completed_at`), measured
+  `execution_s`, requested acceleration, and fallback flags.
+- `plans.npz`: published predictions, their release epochs,
   and drone IDs. Prediction layout follows upstream `[x,y,z,vx,vy,vz]`.
 - `result.json`, `planning.log`, and `metrics.json`/`.csv`/`.md`.
 
@@ -283,9 +250,10 @@ zero after first collision. `--duration` explicitly defines a shorter test
 horizon; full missions use the upstream target-sample horizon. Runs that never
 gather report unavailable gathering times. Re-formation SEARCH percentage is
 unavailable when its observation window is shorter than upstream's 20% rule.
-Execution, queue wait, and latency are in seconds; visibility and completion
-are percentages; coverage efficiency is in `[0,1]`. Metrics count executed
-planning calls, including a pending call that completes after termination.
+Execution times are in seconds; visibility and completion are percentages;
+coverage efficiency is in `[0,1]`. Metrics count executed planning calls.
+`metrics` and `collect` refuse runs recorded with planning delay by earlier
+versions (`compute_ratio` > 0, `--timings-from`, or sequential scheduling).
 Errors and interrupted runs are labeled, not presented as successful missions.
 
 Replay reads these artifacts without importing planners. Quadcopter glyphs with
@@ -314,9 +282,7 @@ The first line reads `Scenario: … · Map size: WxH m · Algorithm: … · N UA
 t = … s · Max solve time d = … ms`, where the video speed is `--speed` (mission
 seconds per video second) and `d = max_i C_i` is the max solve time of the
 latest planning round released at or before the frame time, read from
-`events.jsonl`. `C_i` is the raw host duration (the injected
-delay divided by `--compute-ratio`, or the measured duration when the ratio is
-0), so `d` does not depend on the ratio. The second line shows the minimum UAV
+`events.jsonl` (`C_i` is the measured host duration `execution_s`). The second line shows the minimum UAV
 separation distance (smallest 3D centre-to-centre distance between any two
 UAVs in that frame, as in the `min_inter_uav_m` metric) and the minimum UAV -
 obstacles distance (smallest horizontal distance from any UAV centre to the
@@ -429,22 +395,21 @@ not every UAV joins the formation, or a re-formation window shorter than 20 %
 of the mission) is left empty (`–` in Markdown), and the *Paper metric notes*
 entry says why. The other tables add run settings, safety (clearances,
 collision), formation, tracking distances, computation (fleet round time,
-latency, late delivery) and fallback/safety-layer counts; the Markdown and the
-XLSX *Definitions* sheet define every entry. Compare rows only when their
-compute ratio and scheduling match (runs recorded before sequential scheduling
-was removed may differ); `collect` warns when a file mixes them.
+rounds slower than the control period) and fallback/safety-layer counts; the
+Markdown and the XLSX *Definitions* sheet define every entry.
 
 ## Validation
 
 `uv run pytest -q` checks continuous collision detection, irregular timestamp
-metrics, parallel delivery delays, pending-command motion, failure during a pending
-solve, exact preset loading, estimator and
-prediction aging, hover, acceleration/braking, and 5 ms/2.5 ms convergence.
+metrics, motion and collision between planning releases, pre-round prediction
+snapshots, exact preset loading, prediction-buffer shifting, plan tracking,
+watchdog and speed guard, hover, acceleration/braking, and 5 ms/2.5 ms
+convergence.
 
 Integration validation runs all five methods on the scenario's own fleet.
 These are short smoke experiments, not evidence of full-mission safety or
 paper-quality performance. The scalar CPU RotorPy implementation on this
 machine is slower than real time in these checks; simulator throughput is
-reported independently of algorithm execution time. Use recorded timing replay
-when comparing physics resolutions so OS timing variation is not mistaken for
-integration error.
+reported independently of algorithm execution time. Solve durations do not
+affect the mission, so physics resolutions can be compared directly with the
+same seed and options.

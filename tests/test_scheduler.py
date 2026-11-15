@@ -1,17 +1,11 @@
 import numpy as np
 import pytest
-from uav3d.scheduler import next_release
 from uav3d.physics import RotorPyBackend
 from uav3d.collision import CollisionWorld
 from uav3d.experiment import Simulation
 
 
-def test_release_grid():
-    assert next_release(.27,0,.1)==pytest.approx((.3,2))
-    assert next_release(.3,0,.1)==pytest.approx((.3,2))
-
-
-def test_motion_continues_during_pending_solve():
+def test_motion_between_releases_without_commands():
     physics=RotorPyBackend([[0,0,3]])
     physics.states[0]["v"][0]=1.
     collision=CollisionWorld([],[],[-10,-10,10,10],.2)
@@ -21,10 +15,10 @@ def test_motion_continues_during_pending_solve():
     assert physics.positions()[0,0]==pytest.approx(.07,abs=1e-6)
     assert sim.target(.07)[0]==pytest.approx(.07)
     assert not physics.commands.any()
-    assert not sim.status.any()  # No output published before command delivery.
+    assert not sim.status.any()  # No output published before the first command.
 
 
-def test_collision_during_pending_solve_stops_before_delivery():
+def test_collision_between_releases_stops_the_mission():
     physics=RotorPyBackend([[0,0,3]])
     physics.states[0]["v"][0]=10.
     collision=CollisionWorld([[1,-1,1,2]],[],[-10,-10,10,10],.2)
@@ -33,17 +27,6 @@ def test_collision_during_pending_solve_stops_before_delivery():
     assert sim.hit["reason"]=="obstacle_rectangle"
     assert sim.t==pytest.approx(.08,abs=1e-6)
     assert not physics.commands.any()
-
-
-def test_parallel_round_delivers_together_after_slowest():
-    from uav3d.scheduler import parallel_events
-    events=list(parallel_events([.04,.15,.08],release=.3,round_index=2))
-    assert [e.started_at for e in events]==pytest.approx([.3,.3,.3])
-    assert [e.completed_at for e in events]==pytest.approx([.45,.45,.45])
-    assert [e.queue_wait_s for e in events]==pytest.approx([0,0,0])
-    assert [e.injected_delay_s for e in events]==pytest.approx([.04,.15,.08])
-    with pytest.raises(ValueError):
-        list(parallel_events([.1,float("nan")]))
 
 
 def test_parallel_planners_see_only_pre_round_predictions():
@@ -120,10 +103,8 @@ def test_tracked_plan_resists_drift_and_stops():
     assert np.linalg.norm(physics.velocities()[0,:2])<.05
 
 
-def test_speed_guard_and_stale_plan_rejection():
-    from types import SimpleNamespace
+def test_speed_guard():
     from uav3d.scheduler import PlanSchedule
-    from uav3d.upstream import plan_valid
     states,controls=line_plan(0,2.,20)
     controls[:]=[3.,1.]
     s=PlanSchedule(0.,.1,states,controls,5.,9.,6.,4.,vmax=2.)
@@ -132,31 +113,14 @@ def test_speed_guard_and_stale_plan_rejection():
     assert banded.command(.05,[.1,0],[1.6,0])[0]==pytest.approx(0)  # inside the band
     assert banded.command(.05,[.1,0],[2.5,0])[0]==pytest.approx(-3)  # above: kd*(vmax-speed)
     assert s.command(.05,[.1,0],[1,0])[0]>0
-    cfg=SimpleNamespace(ROBOT_RADIUS=.5)
-    assert plan_valid(s,.5,[1.1,.1],[2,0],cfg)
-    assert not plan_valid(s,.5,[1.5,0],[2,0],cfg)               # 0.5 m behind the plan
-    assert not plan_valid(s,.5,[1,0],[-.5,0],cfg)               # stopped while it assumed 2 m/s
 
 
-def test_compute_ratio_scales_injected_delay():
-    from uav3d.scheduler import scaled_delay, parallel_events
-    assert scaled_delay(.2) == pytest.approx(.2)
-    assert scaled_delay(.2,.5) == pytest.approx(.1)
-    events = list(parallel_events([scaled_delay(d,.5) for d in (.04,.15)],release=.3))
-    assert events[0].completed_at == pytest.approx(.3+.075)
-    assert scaled_delay(.2,0.) == 0.
-    zero = list(parallel_events([scaled_delay(d,0.) for d in (.04,.15)],release=.3))
-    assert all(e.completed_at == pytest.approx(.3) for e in zero)
-    from uav3d.scheduler import next_release
-    assert next_release(.3,.3,.1) == (pytest.approx(.4),0)
-    for bad in (-1.,float("nan"),float("inf")):
-        with pytest.raises(ValueError):
-            scaled_delay(.1,bad)
-
-
-def test_cli_forwards_compute_ratio():
+def test_cli_has_no_delay_options():
     from uav3d.cli import parser, worker_command
-    args = parser().parse_args(["run","--compute-ratio","0.5"])
+    args = parser().parse_args(["run","--duration","2"])
+    assert not hasattr(args,"compute_ratio") and not hasattr(args,"timings_from")
     command = worker_command(args,"ours","runs/x")
-    assert command[command.index("--compute-ratio")+1] == "0.5"
-    assert parser().parse_args(["run"]).compute_ratio == 0.
+    assert command[command.index("--duration")+1] == "2.0"
+    assert "--compute-ratio" not in command
+    with pytest.raises(SystemExit):
+        parser().parse_args(["run","--compute-ratio","0.5"])

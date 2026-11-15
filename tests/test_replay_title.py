@@ -9,21 +9,16 @@ from uav3d.replay import (FIGURE_SPACE, bold, fixed_width, map_size_label, min_o
                           solve_time_label, speed_label, title_text)
 
 
-def event(round, drone, observed, execution, delay):
-    return dict(round=round, drone=drone, observed_at=observed,
-                execution_s=execution, injected_delay_s=delay)
+def event(round, drone, observed, execution):
+    return dict(round=round, drone=drone, observed_at=observed, execution_s=execution)
 
 
-def test_solve_time_is_round_max_independent_of_ratio():
+def test_solve_time_is_round_max():
     raw = [[.02, .05, .03], [.04, .01, .02]]
-    for ratio in (.5, 1., 2.):
-        events = [event(r, i, .1*r, 9., c*ratio) for r, row in enumerate(raw) for i, c in enumerate(row)]
-        releases, solves = round_solve_times(events, ratio)
-        assert np.allclose(releases, [0., .1])
-        assert np.allclose(solves, [.05, .04])
-    # Ratio 0 injects no delay; the measured duration is the solve time.
-    events = [event(0, i, 0., c, 0.) for i, c in enumerate(raw[0])]
-    assert np.allclose(round_solve_times(events, 0.)[1], [.05])
+    events = [event(r, i, .1*r, c) for r, row in enumerate(raw) for i, c in enumerate(row)]
+    releases, solves = round_solve_times(events)
+    assert np.allclose(releases, [0., .1])
+    assert np.allclose(solves, [.05, .04])
 
 
 def test_label_tracks_latest_released_round():
