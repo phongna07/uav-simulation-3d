@@ -2,6 +2,13 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+# Glyph layout at scale 1, in metres: rotor hubs sit on the body diagonals at
+# (±MOTOR_OFFSET, ±MOTOR_OFFSET) and each rotor ring has radius ROTOR_RADIUS.
+MOTOR_OFFSET = .72
+ROTOR_RADIUS = .32
+# Horizontal radius of the glyph at scale 1 (centre to the outer rotor edge).
+GLYPH_RADIUS = float(np.hypot(MOTOR_OFFSET, MOTOR_OFFSET) + ROTOR_RADIUS)
+
 
 def subdivide_triangle(a, b, c, n):
     """Split a triangle into n² congruent triangles (barycentric grid)."""
@@ -78,15 +85,15 @@ class QuadcopterGlyph:
                                         lw=.5, solid_capstyle="round")
                          for _ in self.edges]
 
-        motors = np.array([[x, y, 0.] for x, y in
-                           ((.72, .72), (.72, -.72), (-.72, -.72), (-.72, .72))])
+        m = MOTOR_OFFSET
+        motors = np.array([[x, y, 0.] for x, y in ((m, m), (m, -m), (-m, -m), (-m, m))])
         self.struts = scale * np.array([[np.zeros(3), motor] for motor in motors])
         arm_length = np.linalg.norm(self.struts[0, 1])
         self.arms = [DepthSplitLine(ax, zorder=5, segment=arm_length/8, color="#334155",
                                     lw=2.2, solid_capstyle="butt")
                      for _ in self.struts]
         theta = np.linspace(0, 2*np.pi, ring_points)
-        circle = np.column_stack((.32*np.cos(theta), .32*np.sin(theta),
+        circle = np.column_stack((ROTOR_RADIUS*np.cos(theta), ROTOR_RADIUS*np.sin(theta),
                                   np.full_like(theta, .10)))
         self.rings = scale * np.array([circle + motor for motor in motors])
         self.rotors = [DepthSplitLine(ax, zorder=7, color=color, lw=1.3,

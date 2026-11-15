@@ -311,17 +311,25 @@ The scenery viewport fills the entire output frame without stretching the map;
 the title sits on an opaque white overlay, sized to give the two lines equal
 top and bottom padding, and the UAV legend (UAVs numbered from 1) sits below it.
 The first line reads `Scenario: … · Map size: WxH m · Algorithm: … · N UAVs · Video speed: Sx ·
-t = … s`, where the video speed is `--speed` (mission seconds per video second).
-The second line shows the max solve time
-`d = max_i C_i` of the latest planning round released at or before the frame
-time, read from `events.jsonl`. `C_i` is the raw host duration (the injected
+t = … s · Max solve time d = … ms`, where the video speed is `--speed` (mission
+seconds per video second) and `d = max_i C_i` is the max solve time of the
+latest planning round released at or before the frame time, read from
+`events.jsonl`. `C_i` is the raw host duration (the injected
 delay divided by `--compute-ratio`, or the measured duration when the ratio is
-0), so `d` does not depend on the ratio. It continues with the minimum UAV
+0), so `d` does not depend on the ratio. The second line shows the minimum UAV
 separation distance (smallest 3D centre-to-centre distance between any two
 UAVs in that frame, as in the `min_inter_uav_m` metric) and the minimum UAV -
 obstacles distance (smallest horizontal distance from any UAV centre to the
 nearest rectangle or circle obstacle footprint, matching the collision model's
-vertical obstacle columns; 0 inside one). Values are
+vertical obstacle columns; 0 inside one). Each distance is followed by the
+collision threshold it must stay above, from the scenario's collision radius
+`R = ROBOT_RADIUS`: `(collision < 2R)` for UAV pairs and `(collision < R)` for
+obstacles (1.00 m and 0.50 m in the shipped scenarios). A third, smaller italic
+line discloses that the aircraft icons are not drawn to scale, e.g. `UAV icons
+enlarged ×6.7 for visibility (icon radius 3.35 m); collision radius R = 0.50 m`
+on a 1000 m map: the factor is the drawn icon radius (centre to outer rotor
+edge) divided by `R`, so overlapping icons in the video do not imply a
+collision. The white band is sized to all three lines. Values are
 bold. Mission time, `d` and both distances use fixed-width,
 digit-wide padding so the centered title does not shift between frames. World axes and their labels are hidden for a clean video frame.
 MP4 export uses an environment-managed FFmpeg binary. Replay uses dark gray

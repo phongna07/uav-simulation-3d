@@ -2,9 +2,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import pytest
 
 from uav3d.replay import (FIGURE_SPACE, bold, fixed_width, map_size_label, min_obstacle_distances,
-                          min_separations, round_solve_times,
+                          min_separations, round_solve_times, scale_note,
                           solve_time_label, speed_label, title_text)
 
 
@@ -39,7 +40,7 @@ def test_fixed_width_text_keeps_rendered_width():
               for v in (0., 1.111, 9.999, 10., 123.456, 749.)}
     solves = {fig.text(.5, .5, solve_time_label(np.array([0.]), np.array([v]), 0.)).get_window_extent(renderer).width
                for v in (.0011, .0518, .9999, 2.0359)}
-    gaps = {fig.text(.5, .5, title_text("s", "1000x1000 m", "c", 2, 5., 1., "", v, v)).get_window_extent(renderer).width
+    gaps = {fig.text(.5, .5, title_text("s", "1000x1000 m", "c", 2, 5., 1., "", v, v, .5)).get_window_extent(renderer).width
             for v in (.5, 9.99, 43.07, 120.)}
     plt.close(fig)
     for widths in (times, solves, gaps):
@@ -48,17 +49,33 @@ def test_fixed_width_text_keeps_rendered_width():
 
 def test_title_follows_template_with_bold_values():
     text = title_text("scen1", "1000x1000 m", "pure_mpc", 5, 5., 194.58,
-                      "Max solve time d = x ms", 43.07, 7.5)
+                      "Max solve time d = x ms", 43.07, 7.5, .5)
     first, second = text.split("\n")
     assert first.startswith("Scenario: $\\mathbf{scen1}$ · Map size: $\\mathbf{1000x1000\\ m}$ · "
                             "Algorithm: $\\mathbf{pure\\_mpc}$ · ")
     assert "$\\mathbf{5}$ UAVs · Video speed: $\\mathbf{5x}$ · t = $\\mathbf{" in first
-    assert second.startswith("Max solve time d = x ms · Minimum UAV Separation Distance: ")
-    assert "43.07}$ m · Minimum UAV - Obstacles Distance: $\\mathbf{" in second
-    assert second.endswith("7.50}$ m")
-    assert "n/a" in title_text("s", "m", "c", 1, 1., 0., "", np.nan, 1.)
-    assert "n/a" in title_text("s", "m", "c", 1, 1., 0., "", 1., np.nan)
+    assert first.endswith(" s · Max solve time d = x ms")
+    assert second.startswith("Minimum UAV Separation Distance: ")
+    assert "43.07}$ m (collision < 1.00 m) · Minimum UAV - Obstacles Distance: $\\mathbf{" in second
+    assert second.endswith("7.50}$ m (collision < 0.50 m)")
+    assert "n/a" in title_text("s", "m", "c", 1, 1., 0., "", np.nan, 1., .5)
+    assert "n/a" in title_text("s", "m", "c", 1, 1., 0., "", 1., np.nan, .5)
     assert speed_label(.5) == "0.5x" and speed_label(5.) == "5x"
+
+
+def test_title_thresholds_follow_collision_radius():
+    # UAV pairs collide below 2R; a UAV hits an obstacle below R.
+    text = title_text("s", "m", "c", 2, 1., 0., "", 3., 2., .25)
+    assert "(collision < 0.50 m) · " in text and text.endswith("(collision < 0.25 m)")
+
+
+def test_scale_note_compares_icon_with_collision_radius():
+    from uav3d.aircraft import GLYPH_RADIUS
+    assert GLYPH_RADIUS == pytest.approx(np.hypot(.72, .72) + .32)
+    # 1000 m map: glyph scale 2.5, icon radius 2.5*1.338 = 3.35 m vs R = 0.5 m.
+    assert scale_note(2.5, .5) == ("UAV icons enlarged ×6.7 for visibility "
+                                   "(icon radius 3.35 m); collision radius R = 0.50 m")
+    assert "×2.7" in scale_note(1., .5)
 
 
 def test_min_separation_is_closest_pair_per_sample():

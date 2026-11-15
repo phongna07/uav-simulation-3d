@@ -459,14 +459,33 @@ def speed_label(speed):
 
 
 def title_text(scenario, map_size, controller, n, speed, t, solve_label, separation,
-               clearance):
-    """Two-line replay header; values are bold and numbers keep a fixed width."""
+               clearance, radius):
+    """Three-line replay header; values are bold and numbers keep a fixed width.
+
+    ``radius`` is the collision radius R: two UAVs collide below a centre
+    separation of 2R and a UAV hits an obstacle below a distance of R, so each
+    distance is shown next to the threshold it must stay above.
+    """
     return (f"Scenario: {bold(scenario)} · Map size: {bold(map_size)} · "
             f"Algorithm: {bold(controller)} · "
             f"{bold(n)} UAVs · Video speed: {bold(speed_label(speed))} · "
-            f"t = {bold(fixed_width(t, 7, 3))} s\n"
-            f"{solve_label} · Minimum UAV Separation Distance: {bold(distance_label(separation))} m · "
-            f"Minimum UAV - Obstacles Distance: {bold(distance_label(clearance))} m")
+            f"t = {bold(fixed_width(t, 7, 3))} s · {solve_label}\n"
+            f"Minimum UAV Separation Distance: {bold(distance_label(separation))} m "
+            f"(collision < {2*radius:.2f} m) · "
+            f"Minimum UAV - Obstacles Distance: {bold(distance_label(clearance))} m "
+            f"(collision < {radius:.2f} m)")
+
+
+def scale_note(glyph_scale, radius):
+    """Disclosure that the aircraft icons are drawn larger than the collision body.
+
+    The factor compares the drawn icon radius (centre to outer rotor edge) with
+    the collision radius R actually used by the collision checks.
+    """
+    from .aircraft import GLYPH_RADIUS
+    icon = glyph_scale*GLYPH_RADIUS
+    return (f"UAV icons enlarged ×{icon/radius:.1f} for visibility "
+            f"(icon radius {icon:.2f} m); collision radius R = {radius:.2f} m")
 
 
 def video_frame_times(times, speed, fps):
@@ -526,13 +545,23 @@ def build_scene(args):
         ax.set_proj_type("ortho")
     ax.set_axis_off()
     # Figure overlays do not reserve space or shrink the scenery viewport.
-    title_top = .988
+    radius = float(cfg["params"]["ROBOT_RADIUS"])
+    # Enlarge only the aircraft illustration for field-scale readability.
+    glyph = max(1.,(xmax-xmin)*.0025)
+    title_top = .99
     title = fig.text(.5, title_top, title_text(cfg["scenario"], map_size, cfg["controller"],
                                                states.shape[1], speed, 0., solve_time_label(
-                                                   releases, solves, 0.), 0., 0.),
-                     ha="center", va="top", fontsize=11, color="#111111", zorder=11)
-    # Size the white band to the two lines: equal padding above and below.
-    extent = title.get_window_extent(fig.canvas.get_renderer())
+                                                   releases, solves, 0.), 0., 0., radius),
+                     ha="center", va="top", fontsize=10.5, color="#111111", zorder=11,
+                     linespacing=1.35)
+    # A smaller, muted line states that the icons are not drawn to scale.
+    renderer = fig.canvas.get_renderer()
+    extent = title.get_window_extent(renderer)
+    note = fig.text(.5, extent.y0/fig.bbox.height - .006, scale_note(glyph, radius),
+                    ha="center", va="top", fontsize=9.5, style="italic", color="#475569",
+                    zorder=11)
+    # Size the white band to all lines: equal padding above and below.
+    extent = note.get_window_extent(renderer)
     band = 1 - (extent.y0/fig.bbox.height - (1-title_top))
     fig.add_artist(Rectangle((0, 1-band), 1, band, transform=fig.transFigure,
                              facecolor="white", edgecolor="none", zorder=10))
@@ -543,8 +572,6 @@ def build_scene(args):
                             cfg["scenario_definition"]["circles"], height)
     n = states.shape[1]
     colors = plt.cm.Set1(np.arange(n)%9)
-    # Enlarge only the aircraft illustration for field-scale readability.
-    glyph = max(1.,(xmax-xmin)*.0025)
     half = cfg["params"]["VIEWING_RADIUS"]
     trails,aircraft,footprints = [],[],[]
     for i in range(n):
@@ -585,7 +612,7 @@ def build_scene(args):
             part.place(plan)
         title.set_text(title_text(cfg["scenario"], map_size, cfg["controller"], n, speed,
                                   times[index], solve_time_label(releases, solves, times[index]),
-                                  separations[index], clearances[index]))
+                                  separations[index], clearances[index], radius))
         return []
     return fig, update, times
 
