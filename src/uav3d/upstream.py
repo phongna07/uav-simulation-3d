@@ -49,49 +49,6 @@ def make_robots(cfg, starts):
     return [AdapterRobot(i,np.r_[p,np.zeros(3)],p.copy()) for i,p in enumerate(starts)]
 
 
-# Plan tracking for "ours" (adapter-side; upstream is unchanged). The PD loop
-# has natural frequency 3 rad/s and damping 1; with upstream's ACCEL_TAU = 0.2 s
-# response lag it stays stable (tau*kp < kd). A watchdog stop may use up to
-# 80% of UMAX, leaving the rest for the tracking correction.
-TRACK_KP, TRACK_KD, STOP_ACCEL_RATIO = 9.0, 6.0, 0.8
-# UMAX limits the planner; the Hummingbird (thrust/weight ~10) can do more. The
-# tracking correction may raise the horizontal command to 1.5*UMAX (~37 deg tilt
-# at UMAX = 5), so a plan that brakes at UMAX can still be followed.
-TRACK_ACCEL_RATIO = 1.5
-VMAX_GUARD_BAND = 0.5          # m/s below VMAX at which speed-up is cut
-
-
-def plan_schedule(robot, cfg, release, previous_backup):
-    """The plan behind the command "ours" just issued, and whether it is a stop.
-
-    Returns (schedule, stop_current). A fresh plan, braking prediction, or
-    shifted (age_robot) previous plan starts at release, row 0. When upstream
-    used its CONTINGENCY backup (a failed solve), the aircraft has been flying
-    the current plan rather than the backup branch, so stop_current asks to
-    stop along the current plan; the backup branch is only a fallback when no
-    plan was ever delivered.
-    """
-    from .scheduler import PlanSchedule
-    backup = getattr(robot,"_backup",None)
-    if backup is not None and backup is not previous_backup:
-        robot.backup_epoch = release      # a successful solve made a fresh backup branch
-    stop = getattr(robot,"used_backup",False)
-    if stop:
-        start,states,controls = robot.backup_epoch,backup[0][:,:4],backup[1]
-    else:
-        start = release
-        states = robot.states_prediction[:,[0,1,3,4]]
-        controls = robot.controls_prediction[:,:2]
-    schedule = PlanSchedule(start,cfg.TIMESTEP,np.array(states,float,copy=True),
-                            np.array(controls,float,copy=True),cfg.UMAX,
-                            TRACK_KP,TRACK_KD,STOP_ACCEL_RATIO*cfg.UMAX,cfg.VMAX,
-                            TRACK_ACCEL_RATIO*cfg.UMAX,VMAX_GUARD_BAND)
-    k = schedule.index(release+cfg.TIMESTEP/2)
-    if k < len(controls) and not np.allclose(controls[k],robot.requested_command[:2],atol=1e-9):
-        raise RuntimeError("Plan schedule does not reproduce the issued command")
-    return schedule,stop
-
-
 # Upstream's own cumulative solver-failure counter per controller (read only).
 FAILURE_COUNTERS = {"ours":("mpc","n_fail"),"pure_mpc":("simple","n_fail"),
                     "cbf_qp_lag":("cbfqp","n_infeasible"),"impc_ob_rec":("impc.prob","n_fail")}
@@ -107,14 +64,6 @@ def failure_count(robot, controller):
         owner = getattr(owner,part,None)
     value = getattr(owner,name,None)
     return None if value is None else int(value)
-
-
-def publish_prediction(robot, schedule, release):
-    """Replace upstream's prediction by the trajectory this aircraft really follows."""
-    rows = schedule.prediction(release,len(robot.states_prediction))
-    z = robot.state[2]
-    robot.states_prediction = np.column_stack([rows[:,:2],np.full(len(rows),z),
-                                               rows[:,2:],np.zeros(len(rows))])
 
 
 def age_robot(robot):

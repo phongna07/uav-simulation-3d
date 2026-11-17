@@ -22,18 +22,6 @@ def require_zero_delay(cfg, directory):
                          "only zero-delay runs are supported")
 
 
-def braking_summary(time, braking):
-    """Watchdog braking: per-drone time share and episode count (adapter safety layer)."""
-    time,braking = np.asarray(time,float),np.asarray(braking,bool)
-    weights = np.diff(time)
-    span = time[-1]-time[0]
-    shares = [float(weights@braking[:-1,i])/span*100 if span > 0 else 0. for i in range(braking.shape[1])]
-    episodes = [int(np.sum(braking[1:,i] & ~braking[:-1,i])+braking[0,i]) for i in range(braking.shape[1])]
-    return dict(watchdog_braking_pct_max=max(shares,default=0.),
-                watchdog_braking_pct_mean=float(np.mean(shares)) if shares else 0.,
-                watchdog_braking_episodes=int(sum(episodes)))
-
-
 def target_views(aircraft, target, fov_half, on_progress=None):
     """Per-interval target visibility and coverage efficiency (upstream definitions).
 
@@ -109,8 +97,7 @@ def calculate(time, aircraft, target, status, horizon, fov_half, events=(), resu
              completion_pct=100*time[-1]/horizon,
              success=bool(result and result.get("status")=="completed"),
              mission_time_s=float(time[-1]),horizon_s=horizon,
-             computation_calls=len(events),
-             upstream_stop_fallbacks=sum(bool(e.get("upstream_stop")) for e in events))
+             computation_calls=len(events))
     m.update(stats("execution_s"))
     if result:
         m.update(wall_time_s=result.get("wall_time_s"),throughput=result.get("throughput"),
@@ -161,8 +148,6 @@ def report(directory, tag="metrics", interval=None):
                              on_progress)
         m = calculate(data["time"],data["aircraft"],data["target"],data["status"],
                       cfg["horizon_s"],cfg["params"]["VIEWING_RADIUS"],events,result,views)
-        if "watchdog_braking" in data:
-            m.update(braking_summary(data["time"],data["watchdog_braking"]))
     m.update(controller=cfg["controller"],scenario=cfg["scenario"],seed=cfg["seed"])
     from .experiment import write_json
     write_json(directory/"metrics.json",m)

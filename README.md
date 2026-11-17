@@ -77,8 +77,8 @@ captures clean JSON. Lines never use carriage returns, so a redirected log file
   planner warm-up time), each UAV's first switch to target tracking, then a
   periodic status line: mission time and percentage, planning round, wall time,
   mission-to-wall speed and ETA, round solve time (mean/max of the slowest UAV
-  per round since the last line), UAVs tracking, UAVs in watchdog braking and
-  upstream stop fallbacks. A
+  per round since the last line), UAVs tracking and upstream backup commands
+  so far. A
   collision, interruption or error is reported as it ends the mission, followed
   by artifact writing and a one-line metrics digest.
 - **benchmark**: `[k/N] controller` before and after each child run, with its
@@ -133,37 +133,34 @@ solve counter for that UAV (read only; absent for APF).
 
 ## Command execution
 
-Other methods hold their latest horizontal command for the period. For `ours`
-(`command_execution: tracked_plan_with_watchdog`), each result is the whole
-plan, followed by mission time at the physics rate:
+Every controller, `ours` included, holds its latest horizontal command for the
+planning period (`config.json`: `command_execution: hold_latest`). For `ours`
+this is upstream's own first input `u0|k`; there is no adapter plan tracking,
+watchdog, or replacement of the published prediction, and when upstream falls
+back to its CONTINGENCY backup the backup command is held like any other.
 
-- **Time-indexed plan.** `U[k]` is the feedforward on
-  `[release + k*dt, release + (k+1)*dt)`; each plan replaces the previous one
-  at its release.
-- **Tracking.** `u = U[k] + 9*(p_plan - p) + 6*(v_plan - v)` (3 rad/s,
-  critically damped) removes the drift between upstream's lag model and
-  RotorPy. Only the correction may raise the command above `UMAX`, up to
-  `1.5*UMAX`; the Hummingbird's thrust/weight is about 10, so `UMAX` limits the
-  planner, not the aircraft.
-- **Watchdog.** Each plan stops being followed as-is at the last planned step
-  from which its remaining path suffices to stop at `0.8*UMAX`. The reference
-  then slows to rest along that remaining, corridor-verified path and holds its
-  end point. When upstream falls back to its CONTINGENCY backup (failed solve),
-  the aircraft has been flying the plan, not the backup branch, so it starts this
-  stop immediately and publishes it as its prediction.
-- **Speed guard.** Within 0.5 m/s of `VMAX` the speed-increasing part of the
-  command is removed; above it, it brakes by `6*(VMAX - speed)`. Without it,
-  aircraft overshoot `VMAX`, after which the MPC's hard speed bound is
-  infeasible.
+**Speed guard (default, all controllers).** At the physics rate, once the
+horizontal speed is within `EPS = 0.5` m/s of `VMAX`, the speed-increasing
+part of the held command is removed; above `VMAX` it brakes by
+`6*(VMAX - speed)`. Components across the velocity and braking are untouched.
+The planner still receives the unchanged `VMAX`, so the aircraft effectively
+flies at most about `VMAX - EPS` while every solve starts inside its hard speed
+bound. Without it, the RotorPy plant overshoots `VMAX` (its attitude response
+lags the planner's first-order model), after which the MPC speed constraint is
+infeasible and `ours` falls back to its backup branch. The guard is the same
+code for all five methods, so they are measured under the same condition; it
+does change each method's effective top speed. `--speed-guard-band EPS` sets
+the band and `--speed-guard-band off` disables the guard (ablation).
+`config.json` records it under `speed_guard` (`applies_to: all_controllers`),
+and `collect` shows it in the command-execution row.
 
-These gains and ratios are adapter constants in `upstream.py`, recorded in
-`config.json` under `plan_tracking`. Safety-layer activity is logged:
-`trajectory.npz` has a per-sample, per-drone `watchdog_braking` flag (the drone
-is past its plan's stop point and braking to rest), and events record
-`upstream_stop` (upstream fell back to its backup, so the aircraft stops along
-its current plan). `metrics.json` summarizes these as `watchdog_braking_pct_*`,
-`watchdog_braking_episodes` and `upstream_stop_fallbacks`. Model mismatch can
-invalidate original safety guarantees; failures are recorded.
+Earlier versions of this adapter tracked the whole `ours` plan with a PD loop
+and a braking watchdog; that layer has been removed. Runs recorded with it
+read `command_execution: tracked_plan_with_watchdog` and remain readable by
+`metrics` and `collect`.
+
+Model mismatch can invalidate the original safety guarantees; failures are
+recorded.
 
 Identical seeds do not reproduce OS-dependent solve durations, but solve
 durations do not affect the mission, so the same seed and options reproduce the
@@ -402,8 +399,8 @@ Markdown and the XLSX *Definitions* sheet define every entry.
 
 `uv run pytest -q` checks continuous collision detection, irregular timestamp
 metrics, motion and collision between planning releases, pre-round prediction
-snapshots, exact preset loading, prediction-buffer shifting, plan tracking,
-watchdog and speed guard, hover, acceleration/braking, and 5 ms/2.5 ms
+snapshots, exact preset loading, prediction-buffer shifting, the speed guard
+and its CLI default, hover, acceleration/braking, and 5 ms/2.5 ms
 convergence.
 
 Integration validation runs all five methods on the scenario's own fleet.

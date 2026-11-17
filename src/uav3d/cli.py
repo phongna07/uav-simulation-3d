@@ -2,11 +2,13 @@
 import argparse
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
 import sys
 from . import CONTROLLERS, progress
+from .scheduler import SPEED_GUARD_BAND
 
 
 def add_progress_flag(q):
@@ -14,6 +16,19 @@ def add_progress_flag(q):
                    help="seconds of wall time between progress lines on stderr (default: "
                         f"{progress.DEFAULT_INTERVAL_S:g}); 0 keeps only stage and event lines "
                         f"[env {progress.ENV_INTERVAL}]")
+
+
+def speed_guard_band(text):
+    """--speed-guard-band: a finite, non-negative band in m/s, or 'off' (None)."""
+    if text.strip().lower() == "off":
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected a band in m/s or 'off'") from None
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError("must be finite and non-negative, or 'off'")
+    return value
 
 
 def parser():
@@ -31,6 +46,11 @@ def parser():
                             "(default; one per drone, capped by available CPUs) or N; 1 = serial "
                             "in-process stepping. Results are bit-identical for every value "
                             "[env UAV3D_PHYSICS_WORKERS]")
+        q.add_argument("--speed-guard-band",type=speed_guard_band,default=SPEED_GUARD_BAND,
+                       metavar="EPS|off",
+                       help="every controller: stop speeding up at VMAX-EPS and brake above "
+                            f"VMAX, while the planner keeps VMAX (default: {SPEED_GUARD_BAND:g} "
+                            "m/s); 'off' disables the guard (ablation)")
         q.add_argument("--out",help="new output directory (must not already exist)")
         add_progress_flag(q)
         if name=="benchmark":
@@ -85,6 +105,8 @@ def worker_command(args, controller, output):
                "--progress-interval",repr(args.progress_interval),"--out",str(output)]
     if args.duration is not None:
         command += ["--duration",str(args.duration)]
+    band = getattr(args,"speed_guard_band",SPEED_GUARD_BAND)
+    command += ["--speed-guard-band","off" if band is None else repr(band)]
     return command
 
 

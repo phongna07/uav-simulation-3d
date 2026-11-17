@@ -22,12 +22,11 @@ def make_run(path, controller="ours", horizon=2., full=150., collision=None, sta
                scenario_definition=dict(rects=[[50,-5,10,10]],circles=[],waypoints=[[0,0],[100,0]]))
     (path/"config.json").write_text(json.dumps(cfg))
     events = [dict(round=r,drone=i,observed_at=r*.1,completed_at=r*.1,execution_s=.01*(i+1),
-                   upstream_stop=False,used_backup=False,solver_failures=r//5)
+                   used_backup=False,solver_failures=r//5)
               for r in range(int(round(horizon/.1))) for i in range(n)]
     (path/"events.jsonl").write_text("".join(json.dumps(e)+"\n" for e in events))
     np.savez_compressed(path/"trajectory.npz",time=time,aircraft=aircraft,target=target,
-                        command=np.zeros((len(time),n,3)),status=status,
-                        watchdog_braking=np.zeros((len(time),n),bool))
+                        command=np.zeros((len(time),n,3)),status=status)
     result = dict(status="collision" if collision else "completed",collision=collision,
                   mission_time_s=float(time[-1]),wall_time_s=1.,throughput=2.)
     (path/"result.json").write_text(json.dumps(result))

@@ -17,7 +17,7 @@ from pathlib import Path
 import sys
 import numpy as np
 from . import CONTROLLERS
-from .metrics import braking_summary, calculate, require_zero_delay, target_views
+from .metrics import calculate, require_zero_delay, target_views
 from .upstream import UPSTREAM
 
 PAPER, RUN, SAFETY, FORMATION, TRACKING, COMPUTATION, FALLBACKS = (
@@ -66,7 +66,8 @@ METRICS = [
     M("uavs","UAVs",RUN,"{:d}","Number of UAVs"),
     M("seed","Seed",RUN,"{:d}","run --seed"),
     M("command_execution","Command execution",RUN,None,
-      "tracked_plan_with_watchdog (ours) or hold_latest"),
+      "hold_latest, with the speed guard if one was on (runs recorded before plan tracking was "
+      "removed may read tracked_plan_with_watchdog for ours)"),
     M("horizon_s","Mission length T [s]",RUN,"{:.1f}","Evaluated mission length"),
     M("mission_time_s","Flown duration [s]",RUN,"{:.1f}","Simulation time reached (t_c on a collision)"),
     M("termination","Termination",RUN,None,"completed, collision, interrupted or error"),
@@ -129,11 +130,6 @@ METRICS = [
       "CBF-QP n_infeasible); blank for APF or runs recorded without the counter"),
     M("backup_used","Contingency backup commands",FALLBACKS,"{:d}",
       "Commands taken from upstream's backup branch (ours)"),
-    M("upstream_stops","Upstream stop fallbacks",FALLBACKS,"{:d}",
-      "Delivered results in which upstream fell back to stopping along the current plan"),
-    M("watchdog_pct_max","Watchdog braking, max UAV [%]",FALLBACKS,"{:.1f}",
-      "Adapter: time a UAV braked past the end of its plan (ours), worst UAV"),
-    M("watchdog_episodes","Watchdog braking episodes",FALLBACKS,"{:d}","Adapter: braking episodes, all UAVs"),
 ]
 del M
 BY_KEY = {m.key:m for m in METRICS}
@@ -199,7 +195,6 @@ def evaluate(directory):
     events = [json.loads(l) for l in (directory/"events.jsonl").read_text().splitlines() if l.strip()]
     with np.load(directory/"trajectory.npz") as data:
         time,aircraft,target,status = (np.asarray(data[k]) for k in ("time","aircraft","target","status"))
-        braking = np.asarray(data["watchdog_braking"]) if "watchdog_braking" in data else None
     prm = cfg["params"]
     horizon,fov_half,period = float(cfg["horizon_s"]),float(prm["VIEWING_RADIUS"]),float(cfg["planning_period"])
     n = aircraft.shape[1]
@@ -245,7 +240,9 @@ def evaluate(directory):
         run_id = directory.name
     m.update(run_id=run_id,finished_utc=finished.strftime("%Y-%m-%d %H:%M:%S"),uavs=n,
              seed=cfg.get("seed"),
-             command_execution=cfg.get("command_execution","hold_latest"),horizon_s=horizon,
+             command_execution=cfg.get("command_execution","hold_latest")+(
+                 f" + speed guard (VMAX-{cfg['speed_guard']['band']:g})" if cfg.get("speed_guard") else ""),
+             horizon_s=horizon,
              mission_time_s=t_end,termination=result.get("status"),
              waypoints_reached=_waypoints_reached(cfg["scenario_definition"].get("waypoints",[]),target),
              wall_time_s=result.get("wall_time_s"),real_time_factor=result.get("throughput"))
@@ -307,10 +304,6 @@ def evaluate(directory):
     m["solver_failures"] = sum(counters.values()) if counters else None
     m["backup_used"] = sum(bool(e.get("used_backup")) for e in events) if any(
         "used_backup" in e for e in events) else None
-    m["upstream_stops"] = base["upstream_stop_fallbacks"]
-    if braking is not None and len(time) > 1 and cfg.get("command_execution") == "tracked_plan_with_watchdog":
-        b = braking_summary(time,braking)
-        m["watchdog_pct_max"],m["watchdog_episodes"] = b["watchdog_braking_pct_max"],b["watchdog_braking_episodes"]
     return {k:_clean(v) for k,v in m.items()}
 
 

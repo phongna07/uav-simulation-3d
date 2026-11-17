@@ -14,7 +14,7 @@ import subprocess
 import time
 import numpy as np
 from .physics import RotorPyBackend, resolve_physics_workers
-from .scheduler import plan_against_snapshot
+from .scheduler import SPEED_GUARD_KD, SpeedGuard, plan_against_snapshot
 from . import progress, upstream
 
 
@@ -48,11 +48,12 @@ class Simulation:
         self.t = 0.
         self.hit = None
         n = len(backend.commands)
-        # Per-drone PlanSchedule; None holds backend.commands as delivered.
-        self.schedules = [None]*n
+        # Every drone holds its delivered command (self.held) until the next
+        # one, through self.guard (a SpeedGuard) when one is set.
+        self.held = backend.commands.copy()
+        self.guard = None
         self.status = np.zeros((n,3),int)
         self.times, self.aircraft, self.targets, self.commands, self.statuses = [],[],[],[],[]
-        self.braking = []
         self.sample()
 
     def target(self, t):
@@ -63,11 +64,9 @@ class Simulation:
         return self.target_samples[k]*(1-f)+self.target_samples[j]*f
 
     def sample(self):
-        # Watchdog flag: the drone is past its plan's stop point, i.e. braking to rest.
-        braking = np.array([s is not None and self.t > s.stop_at+1e-9 for s in self.schedules])
         values = (self.t,self.backend.packed().copy(),self.target(self.t),
-                  self.backend.commands.copy(),self.status.copy(),braking)
-        seqs = (self.times,self.aircraft,self.targets,self.commands,self.statuses,self.braking)
+                  self.backend.commands.copy(),self.status.copy())
+        seqs = (self.times,self.aircraft,self.targets,self.commands,self.statuses)
         if self.times and abs(self.times[-1]-self.t) < 1e-12:
             for seq,v in zip(seqs,values):
                 seq[-1] = v
@@ -75,13 +74,20 @@ class Simulation:
             for seq,v in zip(seqs,values):
                 seq.append(v)
 
-    def apply_schedules(self, t):
-        if not any(s is not None for s in self.schedules):
+    def hold(self, i, command):
+        """Deliver a command that is held until the next one."""
+        self.held[i] = command
+        self.backend.commands[i] = command
+        if self.guard is not None:
+            self.apply_guard()          # the command in effect at this instant
+
+    def apply_guard(self):
+        """Pass every held command through the speed guard at the current velocity."""
+        if self.guard is None:
             return
-        positions,velocities = self.backend.positions(),self.backend.velocities()
-        for i,schedule in enumerate(self.schedules):
-            if schedule is not None:
-                self.backend.commands[i,:2] = schedule.command(t,positions[i],velocities[i])
+        velocities = self.backend.velocities()
+        for i in range(len(self.held)):
+            self.backend.commands[i,:2] = self.guard.command(self.held[i,:2],velocities[i])
 
     def advance(self, until):
         until = min(until,self.horizon)
@@ -90,9 +96,8 @@ class Simulation:
             grid = (math.floor((self.t+1e-10)/self.sample_dt)+1)*self.sample_dt
             end = min(grid,until)
             dt = end-self.t
-            # The command in effect for this step: evaluated at its midpoint, so
-            # plan step boundaries on the physics grid are not subject to rounding.
-            self.apply_schedules(self.t+dt/2)
+            # The speed guard acts at the physics rate on the current velocity.
+            self.apply_guard()
             old = self.backend.snapshot()
             p = self.backend.positions()
             self.backend.step(dt)
@@ -146,10 +151,8 @@ class MissionProgress:
         if self.solves:
             parts.append(f"round solve mean {np.mean(self.solves):.3f}s max {max(self.solves):.3f}s")
         self.solves = []
-        braking = int(sim.braking[-1].sum()) if sim.braking else 0
         parts += [f"tracking {int(sim.status[:,0].astype(bool).sum())}/{self.drones}",
-                  f"braking {braking}",
-                  f"stop fallbacks {sum(bool(e.get('upstream_stop')) for e in events)}"]
+                  f"backup commands {sum(bool(e.get('used_backup')) for e in events)}"]
         self.log(" | ".join(parts))
 
 
@@ -202,9 +205,16 @@ def run(args):
                      f"planning period {cfg.TIMESTEP:g}s, physics dt {args.physics_dt:g}s "
                      f"on {physics_workers} worker(s); commands delivered at release")
     backend = RotorPyBackend(starts,args.physics_dt,physics_workers)
-    # "ours" executes its whole plan by mission time; other methods hold the latest command.
-    follow_plan = cfg.CONTROLLER == "ours"
-    execution = "tracked_plan_with_watchdog" if follow_plan else "hold_latest"
+    # Every controller holds its latest command for the period, through the
+    # speed guard (same for all controllers; --speed-guard-band off disables it).
+    band = getattr(args,"speed_guard_band",None)
+    guard = None if band is None else SpeedGuard(cfg.VMAX,band,SPEED_GUARD_KD)
+    if guard is not None:
+        progress.log(tag,f"speed guard: no speed-up above {cfg.VMAX-band:g} m/s, "
+                         f"brake {guard.kd:g}*(VMAX-speed) above VMAX={cfg.VMAX:g} m/s "
+                         "(the planner keeps VMAX)")
+    else:
+        progress.log(tag,"speed guard off")
     with progress.stage(tag,"initializing upstream planners (warm-up)"):
         robots = upstream.initialize(cfg,starts,target_samples[0])
     # Disposable warmup consumes RNG samples; measured experiments get a fresh stream.
@@ -216,12 +226,10 @@ def run(args):
                          horizon_s=horizon,full_target_duration_s=full_duration,
                          physics_dt=args.physics_dt,physics_workers=physics_workers,
                          planning_period=cfg.TIMESTEP,
-                         scheduling="parallel",planning_delay="none",command_execution=execution,
-                         plan_tracking=dict(kp=upstream.TRACK_KP,kd=upstream.TRACK_KD,
-                                            stop_accel_ratio=upstream.STOP_ACCEL_RATIO,
-                                            track_accel_ratio=upstream.TRACK_ACCEL_RATIO,
-                                            vmax_guard_band=upstream.VMAX_GUARD_BAND)
-                         if follow_plan else None,
+                         scheduling="parallel",planning_delay="none",command_execution="hold_latest",
+                         speed_guard=None if guard is None else
+                         dict(vmax=guard.vmax,band=guard.band,kd=guard.kd,
+                              speedup_cut_above=guard.vmax-guard.band,applies_to="all_controllers"),
                          deployment="one_worker_per_uav",order="ascending_drone_id",
                          physics="rotorpy_hummingbird_cmd_acc",aerodynamics=False,
                          upstream_sha=_git_sha(upstream.UPSTREAM),
@@ -234,6 +242,7 @@ def run(args):
                                         ("OMP_NUM_THREADS","OPENBLAS_NUM_THREADS","MKL_NUM_THREADS")})
     write_json(out/"config.json",configuration)
     sim = Simulation(backend,world,target_samples,cfg.TIMESTEP,horizon,args.physics_dt)
+    sim.guard = guard
     initial = world.first_hit(starts,starts)
     if initial:
         sim.hit = dict(time=0.,reason=initial.reason,drones=list(initial.drones))
@@ -263,36 +272,20 @@ def run(args):
             def plan(i, robot):
                 robot.requested_command = None
                 robot.used_backup = False
-                backup = getattr(robot,"_backup",None)
                 before = time.perf_counter()
                 robot.computeControlSignal(robots)
                 measured = time.perf_counter()-before
                 if robot.requested_command is None:
                     raise RuntimeError("Upstream failed to issue an acceleration command")
                 robot.planned = True
-                # Built outside the timed call; the shifted buffers change next round.
-                robot.schedule,robot.stop_current = (upstream.plan_schedule(robot,cfg,release,backup)
-                                                     if follow_plan else (None,False))
                 return measured
 
             def deliver(i, robot, measured):
                 record = dict(round=round_index,drone=i,observed_at=release,completed_at=release,
                               execution_s=measured,requested_command=robot.requested_command.tolist(),
-                              upstream_stop=bool(robot.stop_current),
                               used_backup=bool(getattr(robot,"used_backup",False)),
                               solver_failures=upstream.failure_count(robot,cfg.CONTROLLER))
-                backend.commands[i] = robot.requested_command
-                current = sim.schedules[i]
-                if robot.stop_current and current is not None:
-                    # Upstream fell back to stopping. The aircraft flew the current
-                    # plan, not the backup branch, so it stops along that plan now,
-                    # and publishes that stop as its prediction.
-                    sim.schedules[i] = current.stopped(sim.t)
-                    upstream.publish_prediction(robot,sim.schedules[i],release)
-                else:
-                    sim.schedules[i] = robot.schedule
-                if sim.schedules[i] is not None:
-                    sim.apply_schedules(sim.t)      # the plan's command for this instant
+                sim.hold(i,robot.requested_command)
                 sim.status[i] = (robot.mode == cfg.MODE_TRACK,robot.is_leader_role,
                                  getattr(robot,"mpc_fail_streak",0))
                 plans.append(robot.states_prediction.copy())
@@ -332,8 +325,7 @@ def run(args):
         backend.close()
         np.savez_compressed(out/"trajectory.npz",time=np.array(sim.times),
                             aircraft=np.array(sim.aircraft),target=np.array(sim.targets),
-                            command=np.array(sim.commands),status=np.array(sim.statuses),
-                            watchdog_braking=np.array(sim.braking))
+                            command=np.array(sim.commands),status=np.array(sim.statuses))
         np.savez_compressed(out/"plans.npz",prediction=np.array(plans),
                             epochs=np.array(plan_epochs),drone=np.array(plan_drones))
         (out/"events.jsonl").touch(exist_ok=True)
