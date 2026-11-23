@@ -6,6 +6,13 @@ trajectory, obstacle map, controller parameters, and nominal planning period.
 The aircraft are physical 6-DoF quadrotors flying at controlled altitude; the
 upstream algorithms remain planar.
 
+![Five UAVs (ours) weaving between buildings while tracking the target in scen1](docs/images/scen1-preview.jpg)
+
+*Frame at t = 130 s from a full `scen1` replay with the `ours` controller
+(`uav3d replay … --speed 5 --fps 24`). UAV icons are enlarged ×6.7 for
+visibility; the white dashed line is the target path and the red star the
+target.*
+
 ## Setup
 
 Python 3.12, Git, a C compiler, Python development headers, and GMP development
