@@ -6,6 +6,11 @@ trajectory, obstacle map, controller parameters, and nominal planning period.
 The aircraft are physical 6-DoF quadrotors flying at controlled altitude; the
 upstream algorithms remain planar.
 
+[![Animated clip: five UAVs weaving between buildings while tracking the target in scen1](docs/images/scen1-preview.gif)](docs/images/scen1-preview.mp4)
+
+*Mission t ≈ 90–130 s of `scen1` with `ours`, replayed at 5× (8 s clip).
+Click it for the [higher-quality MP4](docs/images/scen1-preview.mp4).*
+
 ![Five UAVs (ours) weaving between buildings while tracking the target in scen1](docs/images/scen1-preview.jpg)
 
 *Frame at t = 130 s from a full `scen1` replay with the `ours` controller
